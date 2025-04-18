@@ -15,12 +15,14 @@ import torch.backends.cudnn as cudnn
 from data import load_dataset
 from train import train_model, evaluate_model
 
+from prune import prune
 from pathlib import Path
 from torchsummary import summary
 from timm.utils import NativeScaler
 from timm.models import create_model
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
+from peft import LoraConfig, get_peft_model, TaskType
 
 DATA_PATH = {
     "IMNET": "/srv/datasets/imagenet/",
@@ -55,6 +57,14 @@ ATTN_PATH = {
 }
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BASE_DIR = "/home/yuxinr/AttnDistill/"
+lora_config = LoraConfig(
+    r=8,
+    lora_alpha=32,
+    lora_dropout=0.1,
+    bias="none",
+    task_type=TaskType.FEATURE_EXTRACTION,
+    target_modules=["fc1", "fc2"]
+)
 
 
 def parse_replace(value):
@@ -112,13 +122,15 @@ def get_args_parser():
     parser.add_argument("--train-mode", default="parallel", choices=["parallel", "sequential"])
     parser.add_argument("--step", default=12, type=int, help="Step length when sequentially replace blocks and training")
     parser.add_argument("--interm-model", default="", type=str, help="Path of intermediate model in sequential training")
-    parser.add_argument("--replace", type=parse_replace, help="List of indices or range of blocks to replace")
+    parser.add_argument("--replace", default="0-11", type=parse_replace, help="List of indices or range of blocks to replace")
     parser.add_argument("--rep-by", default="lstm", choices=["mixer", "lstm"], 
                         help="Structure used to replace attention")
     parser.add_argument("--skip-train-attn", action='store_true', 
                         help="Use pretrained attn part instead of train from scratch")
     parser.add_argument("--block-ft", action='store_true', 
                         help="Block-level finetune the replaced blocks after training attention")
+    parser.add_argument("--reg-in-train", action='store_true', 
+                        help="Adding regularization in attn training")
     parser.set_defaults(block_ft=True)
     parser.add_argument("--train-loss", default="combine", choices=["similarity", "classification", "combine"],
                         type=str, help="Criterion using in training")
@@ -163,13 +175,15 @@ def get_args_parser():
                         help='LR scheduler when block-level finetuning (default: "cosine")')
     parser.add_argument("--finetune-head", action='store_true', 
                         help="Only use for sequential train/finetune: finetune classification head after sequential train")
+    parser.add_argument("--lora", action='store_true', 
+                        help="Use lora in block finetune")
     parser.set_defaults(finetune_head=True)
     
     # Evaluation setups
     parser.add_argument("--eval-model", default="", help="Path of model to be evaluated")
     
     # Downstream setups
-    parser.add_argument("--ds-mode", default="all", choices=["full", "FC", "FC+head"])
+    parser.add_argument("--ds-mode", default="full", choices=["full", "FC", "FC+head"])
     
     # Finetuning setups
     parser.add_argument("--ft-mode", default="head", choices=["head", "sequential"])
@@ -213,6 +227,17 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+    
+    # pruning setups
+    parser.add_argument('--arch', '-a', metavar='ARCH', default='LSTM',
+                        choices=["LSTM", "Mixer"], help='pretrained model architecture')    
+    parser.add_argument('--reg', type=int, default=3, metavar='R',
+                        help='regularization type: 0:None 1:L1 2:Hoyer 3:HS')
+    parser.add_argument('--decay', type=float, default=1e-4, metavar='D',
+                        help='weight decay for regularizer (default: 0.001)')
+    parser.add_argument('--print-freq', '-p', default=100, type=int,
+                    metavar='N', help='print frequency (default: 100)')  
+    parser.add_argument('--sensitivity', type=float, default=1e-4, help="threshold used for pruning")
     
     return parser
     
@@ -363,7 +388,7 @@ def train(args, seq=0):
     
         # Set training configurations
         if not args.unscale_lr:
-            linear_scaled_lr = args.lr * args.batch_size / 512.0
+            linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
             args.lr = linear_scaled_lr
         optimizer = create_optimizer(args, student_model_without_ddp)
         loss_scaler = NativeScaler()
@@ -375,7 +400,7 @@ def train(args, seq=0):
             model=student_model, teacher_model=teacher_model,
             train_data=data_loader_train, test_data=data_loader_val,
             optimizer=optimizer, loss_scaler=loss_scaler, 
-            lr_scheduler=lr_scheduler, n_parameters=n_parameters
+            lr_scheduler=lr_scheduler, n_parameters=n_parameters,
             )
         
     else: 
@@ -391,6 +416,16 @@ def train(args, seq=0):
         args.interm_model = save_path
     
     if args.block_ft:
+        trained_model_without_ddp = trained_model
+        if args.distributed:
+            trained_model = torch.nn.parallel.DistributedDataParallel(trained_model, device_ids=[args.gpu])
+            trained_model_without_ddp = trained_model.module
+        
+        # Prune model if args.reg_in_train    
+        if args.reg_in_train:
+            trained_model, pruning_mask = prune(args, trained_model_without_ddp, data_loader_val)
+        else:
+            pruning_mask = {}
         print(f"Doing block-level finetuning of attention-trained model...")
         
         if args.dataset != args.ft_dataset:
@@ -401,7 +436,7 @@ def train(args, seq=0):
         print(f"Set trained_model to trainable, blocks {args.replace}, part {args.block_ft_mode}")
         models.set_requires_grad(trained_model, "train", args.replace, args.block_ft_mode) # Target part trainable
         print(f"Set teacher_model to trainable, blocks [], part {args.block_ft_mode}")
-        models.set_requires_grad(teacher_model, "train", [], args.block_ft_mode) # Not trainable
+        models.set_requires_grad(teacher_model, "train", [], "block") # Not trainable
             
         n_parameters = sum(p.numel() for p in trained_model.parameters() if p.requires_grad)
         print(f"number of trainable params: {n_parameters}")
@@ -417,10 +452,14 @@ def train(args, seq=0):
         args.warmup_lr = args.block_ft_warmup_lr
         args.sched = args.block_ft_sched
         
+        if args.lora:
+            trained_model = get_peft_model(trained_model, lora_config)
+            trained_model.forward = trained_model.base_model.forward
+            for name, param in trained_model.named_parameters():
+                if param.requires_grad:
+                    print(name)
+        
         # Set training configurations
-        trained_model_without_ddp = trained_model
-        if args.distributed:
-            trained_model_without_ddp = trained_model.module
         optimizer = create_optimizer(args, trained_model_without_ddp)
         loss_scaler = NativeScaler()
         lr_scheduler, _ = create_scheduler(args, optimizer)
@@ -431,8 +470,11 @@ def train(args, seq=0):
             model=trained_model, teacher_model=teacher_model,
             train_data=data_loader_train, test_data=data_loader_val,
             optimizer=optimizer, loss_scaler=loss_scaler, lr_scheduler=lr_scheduler, 
-            n_parameters=n_parameters
+            n_parameters=n_parameters, reg_mode="finetune", mask=pruning_mask
             )
+        
+        if args.lora:
+            fted_model = fted_model.merge_and_unload() 
         
         # Save finetuned model
         if utils.get_rank() == 0:
@@ -640,7 +682,8 @@ def eval_trained_models(args, seq=0):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("DeiT -> MLP Mixer", parents=[get_args_parser()])
     args = parser.parse_args()
-    print(json.dumps({k: str(v) for k, v in vars(args).items()}, indent=4))
+    if utils.get_rank() == 0:
+        print(json.dumps({k: str(v) for k, v in vars(args).items()}, indent=4))
     utils.init_distributed_mode(args)
     
     if args.data_path is None:

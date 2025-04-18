@@ -6,6 +6,7 @@ import fcntl
 import torch
 import models
 import random
+import datetime
 import argparse
 import numpy as np
 
@@ -18,7 +19,6 @@ import torch.utils.data.distributed
 import torch.backends.cudnn as cudnn
 
 from pathlib import Path
-from datetime import datetime
 
 from data import load_dataset
 from train import train_model_with_reg, evaluate_model, compute_lstm_reg
@@ -32,7 +32,7 @@ DATA_PATH = {
     }
 PRETRAINED_PATH = {
     "Tiny": "/home/yuxinr/AttnDistill/models/2025-03-07-23-15-10/model_seq0.pth",
-    "Small": "",
+    "Small": "/home/yuxinr/AttnDistill/models/2025-03-17-23-15-18/model_seq0.pth",
     "Base": "",
     }
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -82,6 +82,9 @@ def get_args_parser():
     parser.add_argument('--train-interpolation', type=str, default='bicubic',
                         help='Training interpolation (random, bilinear, bicubic default: "bicubic")')
     parser.add_argument('--eval-crop-ratio', default=0.875, type=float, help="Crop ratio for evaluation")
+    parser.add_argument("--repeated-aug", action="store_true", help="used in distributed training")
+    parser.add_argument("--no-repeated-aug", action="store_false", dest="repeated_aug")
+    parser.set_defaults(repeated_aug=True)
     
     # Random Erase params
     parser.add_argument('--reprob', type=float, default=0.25, metavar='PCT', help='Random erase prob (default: 0.25)')
@@ -90,7 +93,7 @@ def get_args_parser():
 
     # Training parameters
     parser.add_argument("--epochs", default=100, type=int, help="Training epochs")
-    parser.add_argument("--ft-epochs", default=30, type=int, help="Fintuning epochs after pruning")
+    parser.add_argument("--ft-epochs", default=100, type=int, help="Fintuning epochs after pruning")
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--ft-batch-size", default=256, type=int)
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER', help='Optimizer (default: "sgd"')
@@ -130,7 +133,7 @@ def get_unique_output_dir(base_dir):
     with open(lock_file, "r+") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         
-        current_time = datetime.now()
+        current_time = datetime.datetime.now()
         timestamp = current_time.strftime("%Y-%m-%d-%H-%M-%S")
         output_dir = model_dir / timestamp
         while output_dir.exists():
@@ -251,9 +254,9 @@ def main(args):
     args.output_dir = get_unique_output_dir(args.base_dir)
     
     # regularized training
+    criterion = torch.nn.CrossEntropyLoss()
     optimizer = create_optimizer(args, model_without_ddp)
     loss_scaler = NativeScaler()
-    criterion = torch.nn.CrossEntropyLoss()
     lr_scheduler, _ = create_scheduler(args, optimizer)
     reg_model, reg_model_dict = train_model_with_reg(
         args=args, model=model, 
@@ -268,7 +271,11 @@ def main(args):
             torch.save(reg_model.module, save_path)
         else:
             torch.save(reg_model, save_path)
-            
+    
+    # reg_model = torch.load("/home/yuxinr/AttnDistill/models/2025-04-11-23-38-04/model_reg.pth")
+    # reg_model.to(args.device)
+    # models.set_requires_grad(reg_model, "prune") # whole model trainable
+    
     # pruning
     reg_model_without_ddp = reg_model
     if args.distributed:

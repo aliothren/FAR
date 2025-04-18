@@ -191,11 +191,14 @@ def compute_lstm_reg(block, args, mode="reg"):
         return weight_groups
         
 
-def train_one_epoch_with_reg(args, model: torch.nn.Module, data_loader: Iterable, 
-                             criterion: torch.nn.Module, optimizer: torch.optim.Optimizer, 
-                             device: torch.device, epoch: int, curves, step,
-                             loss_scaler, max_norm: float = 0, mode="reg", mask={}):
-    model.train()
+def train_one_epoch_with_reg(
+    args, loss_mode, model: torch.nn.Module, teacher_model: torch.nn.Module, 
+    replace: list, data_loader: Iterable, optimizer: torch.optim.Optimizer, 
+    device: torch.device, epoch: int, curves, step,
+    loss_scaler, max_norm: float = 0, mode="reg", mask={}):
+    
+    actual_model = model.module if hasattr(model, "module") else model
+    actual_teacher = teacher_model.module if (teacher_model is not None and hasattr(teacher_model, "module")) else teacher_model
     autocast_ctx = torch.autocast(device_type=device.type)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -208,14 +211,39 @@ def train_one_epoch_with_reg(args, model: torch.nn.Module, data_loader: Iterable
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
          
+         # Calculate training loss
         with autocast_ctx:
-            output = model(samples)
-            loss = criterion(output, targets)
+            if loss_mode == "similarity":
+                criterion = CosineSimilarityLoss()
+                output_student = model(samples)
+                output_teacher = teacher_model(samples)
+                loss = 0
+                for blk in replace:
+                    output_block_s = actual_model.blocks[blk].block_output
+                    output_block_t = actual_teacher.blocks[blk].block_output
+                    loss += criterion(output_block_s, output_block_t)
+                
+            elif loss_mode == "classification":
+                criterion = torch.nn.CrossEntropyLoss()
+                output_student = model(samples)
+                loss = criterion(output_student, targets)
+                
+            elif loss_mode == "combine":
+                ce_criterion = torch.nn.CrossEntropyLoss()
+                cos_criterion = CosineSimilarityLoss()
+                output_student = model(samples)
+                output_teacher = teacher_model(samples)
+                loss = ce_criterion(output_student, targets)
+                for blk in replace:
+                    output_block_s = actual_model.blocks[blk].block_output
+                    output_block_t = actual_teacher.blocks[blk].block_output
+                    loss += cos_criterion(output_block_s, output_block_t)
 
+        # Calculate reg loss
         reg = 0.0
         if mode == "reg":
             if args.arch == "LSTM" and args.decay:
-                for block in model.blocks:
+                for block in actual_model.blocks:
                     reg += compute_lstm_reg(block, args, mode)
                     
             elif args.arch == "Mixer":
@@ -258,7 +286,7 @@ def train_one_epoch_with_reg(args, model: torch.nn.Module, data_loader: Iterable
         metric_logger.update(total_loss=total_loss_value)
         metric_logger.update(loss=loss_value)
         metric_logger.update(reg=reg.item() if isinstance(reg, torch.Tensor) else reg)
-        prec1, prec5 = reg_accuracy(output, targets, topk=(1, 5))
+        prec1, prec5 = reg_accuracy(output_student, targets, topk=(1, 5))
         metric_logger.update(prec1=prec1[0])
         metric_logger.update(prec5=prec5[0])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
@@ -318,8 +346,10 @@ def train_one_epoch_with_reg(args, model: torch.nn.Module, data_loader: Iterable
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, curves, step
 
   
-def train_model(args, stage, loss_mode, model, teacher_model, train_data, test_data,
-                optimizer, loss_scaler, lr_scheduler, n_parameters):
+def train_model(
+    args, stage, loss_mode, model, teacher_model, train_data, test_data,
+    optimizer, loss_scaler, lr_scheduler, n_parameters,
+    reg_mode="reg", mask = {}):
     
     actual_model = model.module if hasattr(model, "module") else model
 
@@ -329,13 +359,18 @@ def train_model(args, stage, loss_mode, model, teacher_model, train_data, test_d
     checkpoint_path = args.output_dir / f"{stage}_checkpoint.pth"
     best_checkpoint_path = args.output_dir / f"{stage}_best_checkpoint.pth"
     if utils.get_rank() == 0:
-        print(f"Start {stage} training for {args.epochs} epochs")      
+        print(f"Start {stage} training for {args.epochs} epochs, regularization status: {args.reg_in_train}")      
     
     if teacher_model is not None:
         teacher_model.eval()
          
     start_time = time.time()
     max_accuracy = 0.0
+    if args.reg_in_train:
+        # columns: [step, loss, reg, elt_sparsity, input_sparsity, output_sparsity, total_loss]
+        curves = np.zeros((args.epochs*(len(train_data)//10),7))
+        valid = np.zeros((args.epochs,3))
+        step = 0  
     for epoch in range(args.epochs):
         # Set only target part in training mode
         actual_model.eval()
@@ -349,16 +384,27 @@ def train_model(args, stage, loss_mode, model, teacher_model, train_data, test_d
             
         if args.distributed:
             train_data.sampler.set_epoch(epoch)
-            
-        train_stats = train_one_epoch(
-            mode=loss_mode, model=model, teacher_model=teacher_model, 
-            replace=args.replace, data_loader=train_data, 
-            optimizer=optimizer, device=args.device, epoch=epoch, 
-            loss_scaler=loss_scaler, max_norm=args.clip_grad)
+    
+        if args.reg_in_train:
+            train_stats, curves, step = train_one_epoch_with_reg(
+                args, loss_mode=loss_mode, model=model, teacher_model=teacher_model, 
+                replace=args.replace, data_loader=train_data, 
+                optimizer=optimizer, device=args.device, epoch=epoch, curves=curves, step=step,
+                loss_scaler=loss_scaler, max_norm=args.clip_grad, mode=reg_mode, mask=mask)
+        else:
+            train_stats = train_one_epoch(
+                mode=loss_mode, model=model, teacher_model=teacher_model, 
+                replace=args.replace, data_loader=train_data, 
+                optimizer=optimizer, device=args.device, epoch=epoch, 
+                loss_scaler=loss_scaler, max_norm=args.clip_grad)
 
         lr_scheduler.step(epoch)
         
-        # Save checkpoint model
+        # Evaluate training
+        test_stats_class = evaluate_model(test_data, args.device, model, None, "classification") # Classification result on test set
+        if loss_mode in ["similarity", "combine"]:
+            test_stats_cosine = evaluate_model(test_data, args.device, model, teacher_model, "similarity") # Similarity loss on test set
+
         model_dict = {
             'model': actual_model.state_dict(),
             'optimizer': optimizer.state_dict(),
@@ -367,35 +413,35 @@ def train_model(args, stage, loss_mode, model, teacher_model, train_data, test_d
             'scaler': loss_scaler.state_dict(),
             'args': args,
             }
-        if utils.get_rank() == 0 and epoch%10 == 0:
-            torch.save(model_dict, checkpoint_path)
-        
-        # Evaluate training
-        test_stats_class = evaluate_model(test_data, args.device, model, None, "classification") # Classification result on test set
-        if loss_mode in ["similarity", "combine"]:
-            test_stats_cosine = evaluate_model(test_data, args.device, model, teacher_model, "similarity") # Similarity loss on test set
-
-        # Save best checkpoint
-        if max_accuracy < test_stats_class["acc1"]:
-            max_accuracy = test_stats_class["acc1"]
-            if utils.get_rank() == 0:
+        # Save checkpoint and logs
+        if utils.get_rank() == 0:
+            # Save checkpoint every 10 epochs
+            if epoch % 10 == 0:
+                torch.save(model_dict, checkpoint_path)
+            # Save best checkpoint
+            if max_accuracy < test_stats_class["acc1"]:
+                max_accuracy = test_stats_class["acc1"]
                 torch.save(model_dict, best_checkpoint_path)
-        if utils.get_rank() == 0:
             print(f'Max accuracy: {max_accuracy:.2f}%')
-
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats_class.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
-        if loss_mode in ["similarity", "combine"]:
-            log_stats.update({f'test_cosine_{k}': v for k, v in test_stats_cosine.items()})
-        if utils.get_rank() == 0:
+            # Save logs
+            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                         **{f'test_{k}': v for k, v in test_stats_class.items()},
+                         'epoch': epoch,
+                         'n_parameters': n_parameters}
+            if loss_mode in ["similarity", "combine"]:
+                log_stats.update({f'test_cosine_{k}': v for k, v in test_stats_cosine.items()})
             with (args.output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
+            if args.reg_in_train:
+                test_acc = [test_stats_class["acc1"], test_stats_class["acc5"]]
+                utils.save_train_fig(
+                    save_path=args.output_dir, epoch=epoch, acc=test_acc,
+                    curves=curves, valid=valid, step=step, mode=stage
+                )
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     if utils.get_rank() == 0:
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print(f"{stage} finished.")
         print('Training time {}'.format(total_time_str))
         with (args.output_dir / "log.txt").open("a") as f:
@@ -432,8 +478,9 @@ def train_model_with_reg(
             train_data.sampler.set_epoch(epoch)
             
         train_stats, curves, step = train_one_epoch_with_reg(
-            args, model=model, data_loader=train_data, criterion=criterion,
-            optimizer=optimizer, device=args.device, epoch=epoch, curves=curves, step=step,
+            args, loss_mode="classification", model=model, teacher_model=None,
+            replace=args.replace, data_loader=train_data, optimizer=optimizer, 
+            device=args.device, epoch=epoch, curves=curves, step=step,
             loss_scaler=loss_scaler, max_norm=args.clip_grad, mode=mode, mask=mask)
 
         lr_scheduler.step(epoch)
@@ -441,16 +488,16 @@ def train_model_with_reg(
         # Evaluate training
         test_stats = evaluate_model(test_data, args.device, model)
 
+        model_dict = {
+            'model': actual_model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'lr_scheduler': lr_scheduler.state_dict(),
+            'epoch': epoch,
+            'scaler': loss_scaler.state_dict(),
+            'args': args,
+            }
         # Save checkpoint and logs
         if utils.get_rank() == 0:
-            model_dict = {
-                'model': actual_model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'scaler': loss_scaler.state_dict(),
-                'args': args,
-                }
             # Save checkpoint every 10 epochs
             if epoch % 10 == 0:
                 torch.save(model_dict, checkpoint_path)

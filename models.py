@@ -179,7 +179,10 @@ def set_requires_grad(model, mode = "train", target_blocks = [], target_part = "
         print("Model is None, cannot set trainable parts.")
         return
     
+    raw_model = model.module if hasattr(model, "module") else model
+    
     target_names = [f"blocks.{block}." for block in target_blocks]
+    
     print("Trainable Params:")
     # Global fintune when transfer to downstream datasets
     if mode == "downstream":
@@ -193,17 +196,17 @@ def set_requires_grad(model, mode = "train", target_blocks = [], target_part = "
                     if "mlp" in name:
                         param.requires_grad = trainable
                         print(name)
-            for name, param in model.head.named_parameters():
+            for name, param in raw_model.head.named_parameters():
                 param.requires_grad = True
                 print(name)
         elif target_part == "FC+head":
             for name, param in model.named_parameters():
                 param.requires_grad = not trainable
                 if any(target in name for target in target_names):
-                    if "mlp" in name or "proj" in name:
+                    if "mlp" in name:
                         param.requires_grad = trainable
                         print(name)
-            for name, param in model.head.named_parameters():
+            for name, param in raw_model.head.named_parameters():
                 param.requires_grad = True
                 print(name)
         
@@ -216,7 +219,7 @@ def set_requires_grad(model, mode = "train", target_blocks = [], target_part = "
         if target_part == "head":
             for param in model.parameters():
                 param.requires_grad = False
-            for name, param in model.head.named_parameters():
+            for name, param in raw_model.head.named_parameters():
                 param.requires_grad = True
                 print(name)
         # turn the whole blocks to trainable
@@ -258,7 +261,7 @@ def set_requires_grad(model, mode = "train", target_blocks = [], target_part = "
                     if "mlp" in name:
                         param.requires_grad = trainable
                         print(name)
-            for name, param in model.module.head.named_parameters():
+            for name, param in raw_model.head.named_parameters():
                 param.requires_grad = True
                 print(name)
                         
