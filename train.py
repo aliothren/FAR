@@ -4,6 +4,7 @@ import time
 import json
 import torch
 import utils
+import models
 import datetime
 import numpy as np
 
@@ -62,8 +63,34 @@ def evaluate_model(data_loader, device, model, teacher_model = None, loss_type="
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+
+def apply_masks(model, multi_lstm=False, lstm_mask={}, reg=False, reg_mask={}):
+    if multi_lstm:
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                if 'weight_ih' in name:
+                    param.grad.data.mul_(lstm_mask["mask_ih"].to(param.device))
+                elif 'weight_hh' in name:
+                    param.grad.data.mul_(lstm_mask["mask_ih"].to(param.device))
+    if reg:
+        for name, param in model.named_parameters():
+            if 'weight' in name and name in reg_mask:
+                param.grad.data.mul_(reg_mask[name].to(param.device))
+                
+                
+def build_grad_mask_fn(model, multi_lstm=False, lstm_mask=None, reg=False, reg_mask=None):
+    def grad_mask_fn():
+        apply_masks(
+            model=model,
+            multi_lstm=multi_lstm,
+            lstm_mask=lstm_mask or {},
+            reg=reg,
+            reg_mask=reg_mask or {}
+        )
+    return grad_mask_fn  
+     
     
-def train_one_epoch(mode, model: torch.nn.Module, teacher_model: torch.nn.Module, 
+def train_one_epoch(args, mode, model: torch.nn.Module, teacher_model: torch.nn.Module, 
                     replace: list, data_loader: Iterable, optimizer: torch.optim.Optimizer, 
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0):
     actual_model = model.module if hasattr(model, "module") else model
@@ -73,11 +100,11 @@ def train_one_epoch(mode, model: torch.nn.Module, teacher_model: torch.nn.Module
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 100
-    
+            
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-         
+          
         with autocast_ctx:
             if mode == "similarity":
                 criterion = CosineSimilarityLoss()
@@ -119,7 +146,7 @@ def train_one_epoch(mode, model: torch.nn.Module, teacher_model: torch.nn.Module
                     parameters=model.parameters(), create_graph=is_second_order)
 
         torch.cuda.synchronize()
-
+        
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         
@@ -196,7 +223,7 @@ def train_one_epoch_with_reg(
     replace: list, data_loader: Iterable, optimizer: torch.optim.Optimizer, 
     device: torch.device, epoch: int, curves, step,
     loss_scaler, max_norm: float = 0, mode="reg", mask={}):
-    
+    model.train()
     actual_model = model.module if hasattr(model, "module") else model
     actual_teacher = teacher_model.module if (teacher_model is not None and hasattr(teacher_model, "module")) else teacher_model
     autocast_ctx = torch.autocast(device_type=device.type)
@@ -356,14 +383,27 @@ def train_model(
     if utils.get_rank() == 0:
         with (args.output_dir / "log.txt").open("a") as f:
             f.write("Args: " + str(args) + "\n")
+        print(f"Start {stage} training for {args.epochs} epochs, regularization status: {args.reg_in_train}")      
+            
     checkpoint_path = args.output_dir / f"{stage}_checkpoint.pth"
     best_checkpoint_path = args.output_dir / f"{stage}_best_checkpoint.pth"
-    if utils.get_rank() == 0:
-        print(f"Start {stage} training for {args.epochs} epochs, regularization status: {args.reg_in_train}")      
     
     if teacher_model is not None:
         teacher_model.eval()
-         
+    
+    if args.rep_by == "multi-lstm":
+        input_dim = actual_model.blocks[0].attn.input_dim
+        head_num = actual_model.blocks[0].attn.head_num
+        hidden_dim = actual_model.blocks[0].attn.hidden_dim // head_num
+        mask_ih = models.get_block_mask(input_dim // head_num, hidden_dim, head_num)
+        mask_hh = models.get_block_mask(hidden_dim, hidden_dim, head_num)
+        grad_mask_fn = build_grad_mask_fn(
+                            model,
+                            multi_lstm=True,
+                            lstm_mask={"mask_ih": mask_ih, "mask_hh": mask_hh}
+                        )
+        loss_scaler = utils.CustomNativeScaler(grad_mask_fn=grad_mask_fn)
+    
     start_time = time.time()
     max_accuracy = 0.0
     if args.reg_in_train:
@@ -393,11 +433,17 @@ def train_model(
                 loss_scaler=loss_scaler, max_norm=args.clip_grad, mode=reg_mode, mask=mask)
         else:
             train_stats = train_one_epoch(
-                mode=loss_mode, model=model, teacher_model=teacher_model, 
+                args=args, mode=loss_mode, model=model, teacher_model=teacher_model, 
                 replace=args.replace, data_loader=train_data, 
                 optimizer=optimizer, device=args.device, epoch=epoch, 
                 loss_scaler=loss_scaler, max_norm=args.clip_grad)
-
+         
+        with torch.no_grad():
+            num_zeros = (actual_model.blocks[0].attn.lstm.weight_ih_l0 == 0).sum().item()
+            total_elements = actual_model.blocks[0].attn.lstm.weight_ih_l0.numel()
+            zero_ratio = num_zeros / total_elements
+            print(f"[MASK CHECK] weight_ih_l0 zero ratio: {zero_ratio:.4f} ({num_zeros}/{total_elements})")   
+               
         lr_scheduler.step(epoch)
         
         # Evaluate training

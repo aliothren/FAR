@@ -8,6 +8,67 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch.distributed as dist
 from collections import defaultdict, deque
+from timm.utils.agc import adaptive_clip_grad
+
+
+def dispatch_clip_grad(parameters, value: float, mode: str = 'norm', norm_type: float = 2.0):
+    """ Dispatch to gradient clipping method
+
+    Args:
+        parameters (Iterable): model parameters to clip
+        value (float): clipping value/factor/norm, mode dependant
+        mode (str): clipping mode, one of 'norm', 'value', 'agc'
+        norm_type (float): p-norm, default 2.0
+    """
+    if mode == 'norm':
+        torch.nn.utils.clip_grad_norm_(parameters, value, norm_type=norm_type)
+    elif mode == 'value':
+        torch.nn.utils.clip_grad_value_(parameters, value)
+    elif mode == 'agc':
+        adaptive_clip_grad(parameters, value, norm_type=norm_type)
+    else:
+        assert False, f"Unknown clip mode ({mode})."
+
+
+# Modify NativeScaler from timms, add grad_mask_fn
+class CustomNativeScaler:
+    state_dict_key = "amp_scaler"
+
+    def __init__(self, grad_mask_fn=None, device='cuda'):
+        self.grad_mask_fn = grad_mask_fn
+        try:
+            self._scaler = torch.amp.GradScaler(device=device)
+        except (AttributeError, TypeError) as e:
+            self._scaler = torch.cuda.amp.GradScaler()
+
+    def __call__(
+            self,
+            loss,
+            optimizer,
+            clip_grad=None,
+            clip_mode='norm',
+            parameters=None,
+            create_graph=False,
+            need_update=True,
+    ):
+        self._scaler.scale(loss).backward(create_graph=create_graph)
+        
+        if self.grad_mask_fn is not None:
+            self.grad_mask_fn()
+            
+        if need_update:
+            if clip_grad is not None:
+                assert parameters is not None
+                self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
+                dispatch_clip_grad(parameters, clip_grad, mode=clip_mode)
+            self._scaler.step(optimizer)
+            self._scaler.update()
+
+    def state_dict(self):
+        return self._scaler.state_dict()
+
+    def load_state_dict(self, state_dict):
+        self._scaler.load_state_dict(state_dict)
 
 
 class SmoothedValue(object):
@@ -311,33 +372,36 @@ def save_train_fig(save_path, epoch, acc, curves, valid, step, mode):
 
     
 def print_nonzeros(model):
-    nonzero = total = 0
+    nz_param = 0
+    nz_channel = 0
+    total = 0
     for name, p in model.named_parameters():
         if 'weight' in name:
+            # Element-wise sparsity
             tensor = p.data.cpu().numpy()
+            if tensor.ndim < 2:
+                print(f"{name:20} | Skipped channel-wise sparsity (not a matrix): shape = {tensor.shape}")
+                continue
             nz_count = np.count_nonzero(tensor)
             total_params = np.prod(tensor.shape)
-            nonzero += nz_count
+            nz_param += nz_count
             total += total_params
-            print(f'{name:20} | nonzeros = {nz_count:7} / {total_params:7} ({100 * nz_count / total_params:6.2f}%) | total_pruned = {total_params - nz_count :7} | shape = {tensor.shape}')
-        if 'weight' in name:
-            tensor = np.abs(tensor)
-            if "proj" in name:
-                dim = np.sum(tensor, axis=0)  # 按列统计
-                label = "col"
-            elif '_ih_l' in name or '_hh_l' in name:
-                match = re.search(r'_l(\d+)(?:_reverse)?', name)
-                if match:
-                    layer_idx = int(match.group(1))
-                    if layer_idx % 2 == 0:
-                        dim = np.sum(tensor, axis=0)  # 偶数层按列
-                        label = 'col'
-                    else:
-                        dim = np.sum(tensor, axis=1)  # 奇数层按行
-                        label = 'row'
+            print(f'{name:20} |')
+            print(f'Element: nonzeros = {nz_count:7} / {total_params:7} ({100 * nz_count / total_params:6.2f}%) | total_pruned = {total_params - nz_count :7} | shape = {tensor.shape}')
             
-            nz_dim = np.count_nonzero(dim)
-            print(f'{"":35} | {label}_active = {nz_dim:5d} / {len(dim):5d} '
-                  f'({100 * nz_dim / len(dim):6.2f}%)')    
+            # Channel-wise sparsity
+            abs_tensor = np.abs(tensor)
+            if abs_tensor.ndim == 4:
+                reshaped = abs_tensor.reshape(abs_tensor.shape[0], -1)  # [out_channels, in_channels × kh × kw]
+            elif tensor.ndim == 2:
+                reshaped = abs_tensor
+            num_rows, num_cols = reshaped.shape
+            num_nz_rows = np.count_nonzero(np.sum(reshaped, axis=1) > 0)
+            num_nz_cols = np.count_nonzero(np.sum(reshaped, axis=0) > 0)
+            effective_params = num_nz_rows * num_nz_cols
+            nz_channel += effective_params
+            print(f'Channel: nz_rows = {num_nz_rows:7} / {num_rows:7} ({100 * num_nz_rows / num_rows:6.2f}%)')
+            print(f'Channel: nz_cols = {num_nz_cols:7} / {num_cols:7} ({100 * num_nz_cols / num_cols:6.2f}%)')
+            print(f'Channel: total_pruned = {total_params - effective_params :7} ({100 * effective_params / total_params}% left) | shape = {tensor.shape}')
 
-    print(f'alive: {nonzero}, pruned : {total - nonzero}, total: {total}, Compression rate : {total/nonzero:10.2f}x  ({100 * (total-nonzero) / total:6.2f}% pruned)')
+    print(f'alive: {nz_channel}, pruned : {total - nz_channel}, total: {total}, Compression rate : {total/nz_channel:10.2f}x  ({100 * (total-nz_channel) / total:6.2f}% pruned)')

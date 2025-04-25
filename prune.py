@@ -151,10 +151,11 @@ def get_unique_output_dir(base_dir):
 def prune(args, model, data_loader_val):
     # Initial pruning
     print("--- Pruning ---")
+    actual_model = model.module if hasattr(model, "module") else model
     masks = {}
     threshold = args.sensitivity 
     if args.arch == "LSTM":
-        for block in model.blocks:
+        for block in actual_model.blocks:
             weight_groups = compute_lstm_reg(block, args, "mask")
             vector_masks = {
                 name: (values > threshold).float()
@@ -253,28 +254,28 @@ def main(args):
     
     args.output_dir = get_unique_output_dir(args.base_dir)
     
-    # regularized training
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = create_optimizer(args, model_without_ddp)
-    loss_scaler = NativeScaler()
-    lr_scheduler, _ = create_scheduler(args, optimizer)
-    reg_model, reg_model_dict = train_model_with_reg(
-        args=args, model=model, 
-        train_data=data_loader_train, test_data=data_loader_val,
-        optimizer=optimizer, loss_scaler=loss_scaler, criterion=criterion,
-        lr_scheduler=lr_scheduler, n_parameters=n_parameters                         
-        )
-    
-    if utils.get_rank() == 0:
-        save_path = args.output_dir / "model_reg.pth"
-        if hasattr(reg_model, 'module'):
-            torch.save(reg_model.module, save_path)
-        else:
-            torch.save(reg_model, save_path)
-    
-    # reg_model = torch.load("/home/yuxinr/AttnDistill/models/2025-04-11-23-38-04/model_reg.pth")
-    # reg_model.to(args.device)
-    # models.set_requires_grad(reg_model, "prune") # whole model trainable
+    # regularized training
+    # optimizer = create_optimizer(args, model_without_ddp)
+    # loss_scaler = NativeScaler()
+    # lr_scheduler, _ = create_scheduler(args, optimizer)
+    # reg_model, reg_model_dict = train_model_with_reg(
+    #     args=args, model=model, 
+    #     train_data=data_loader_train, test_data=data_loader_val,
+    #     optimizer=optimizer, loss_scaler=loss_scaler, criterion=criterion,
+    #     lr_scheduler=lr_scheduler, n_parameters=n_parameters                         
+    #     )
+    # 
+    # if utils.get_rank() == 0:
+    #     save_path = args.output_dir / "model_reg.pth"
+    #     if hasattr(reg_model, 'module'):
+    #         torch.save(reg_model.module, save_path)
+    #     else:
+    #         torch.save(reg_model, save_path)
+    args.replace = list(range(12))
+    reg_model = torch.load("/home/yuxinr/AttnDistill/models/2025-04-18-01-50-56/model_seq0.pth")
+    reg_model.to(args.device)
+    models.set_requires_grad(reg_model, "prune") # whole model trainable
     
     # pruning
     reg_model_without_ddp = reg_model
@@ -282,7 +283,7 @@ def main(args):
         reg_model = torch.nn.parallel.DistributedDataParallel(reg_model, device_ids=[args.gpu])
         reg_model_without_ddp = reg_model.module
     pruned_model, pruning_mask = prune(args, reg_model_without_ddp, data_loader_val)
-    
+
     # finetuning pruned model
     pruned_model_without_ddp = pruned_model
     if args.distributed:

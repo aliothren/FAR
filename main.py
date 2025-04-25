@@ -17,7 +17,7 @@ from train import train_model, evaluate_model
 
 from prune import prune
 from pathlib import Path
-from torchsummary import summary
+from torchinfo import summary
 from timm.utils import NativeScaler
 from timm.models import create_model
 from timm.optim import create_optimizer
@@ -45,6 +45,20 @@ MODEL_PATH = {
     "DeiT-Base": {
         "name": "deit_base_patch16_224",
         "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
+        },
+    }
+DS_DEIT_PATH = {
+    "DeiT-Tiny": {
+        "CIFAR10": "/home/yuxinr/AttnDistill/AttReplace/benchmodels/deit/tiny_cifar10.pth",
+        "CIFAR100": "/home/yuxinr/AttnDistill/AttReplace/benchmodels/deit/tiny_cifar100.pth",
+        "INAT18": "/home/yuxinr/AttnDistill/AttReplace/benchmodels/deit/tiny_inat18.pth",
+        "INAT19": "/home/yuxinr/AttnDistill/AttReplace/benchmodels/deit/tiny_inat19.pth",
+        "FLOWER": "/home/yuxinr/AttnDistill/AttReplace/benchmodels/deit/tiny_flower.pth",
+        "CAR": "/home/yuxinr/AttnDistill/AttReplace/benchmodels/deit/tiny_car.pth",
+        },
+    "DeiT-Small": {
+        },
+    "DeiT-Base": {
         },
     }
 PRETRAINED_PATH = {
@@ -81,7 +95,7 @@ def parse_replace(value):
 
 
 def get_args_parser():
-    parser = argparse.ArgumentParser("DeiT -> MLP Mixer", add_help=False)
+    parser = argparse.ArgumentParser("Attention replacement", add_help=False)
     
     # Environment setups
     parser.add_argument("--device", default=DEVICE)
@@ -119,11 +133,11 @@ def get_args_parser():
                         help="Runing mode")
     
     # Training setups
-    parser.add_argument("--train-mode", default="parallel", choices=["parallel", "sequential"])
+    parser.add_argument("--train-mode", default="sequential", choices=["parallel", "sequential"])
     parser.add_argument("--step", default=12, type=int, help="Step length when sequentially replace blocks and training")
     parser.add_argument("--interm-model", default="", type=str, help="Path of intermediate model in sequential training")
     parser.add_argument("--replace", default="0-11", type=parse_replace, help="List of indices or range of blocks to replace")
-    parser.add_argument("--rep-by", default="lstm", choices=["mixer", "lstm"], 
+    parser.add_argument("--rep-by", default="lstm", choices=["mixer", "lstm", "multi-lstm"], 
                         help="Structure used to replace attention")
     parser.add_argument("--skip-train-attn", action='store_true', 
                         help="Use pretrained attn part instead of train from scratch")
@@ -131,6 +145,10 @@ def get_args_parser():
                         help="Block-level finetune the replaced blocks after training attention")
     parser.add_argument("--reg-in-train", action='store_true', 
                         help="Adding regularization in attn training")
+    parser.add_argument("--ds-in-train", action='store_true', 
+                        help="Downstream training from deit downstream model")
+    parser.add_argument("--init-with-pretrained", action='store_true', 
+                        help="Downstream training from deit downstream model")
     parser.set_defaults(block_ft=True)
     parser.add_argument("--train-loss", default="combine", choices=["similarity", "classification", "combine"],
                         type=str, help="Criterion using in training")
@@ -317,64 +335,103 @@ def train(args, seq=0):
 
     data_loader_train = load_dataset(args, "train")
     data_loader_val, _ = load_dataset(args, "val")
-        
-    # Load base models
-    print(f"Creating Base model: {args.base_model}")
-    model_name = MODEL_PATH[args.base_model]["name"]
-    if args.base_weight == "":
-        model_weight = MODEL_PATH[args.base_model]["weight"]
-        print("Using default model weight.")
-    else:
-        model_weight = args.base_weight
-    print(f"Using weight file {model_weight}")
-    base_model = create_model(
-        model_name=model_name, pretrained=False, num_classes=args.nb_classes, drop_rate=args.drop,
-        drop_path_rate=args.drop_path, drop_block_rate=None, img_size=args.input_size
-        )
-    base_model = models.load_weight(base_model, model_weight)
-    base_model.to(args.device)
-    
+     
     # Set unique output directory
     if seq == 0:
         args.output_dir = get_unique_output_dir(args.base_dir)
-        
-    # Load and modify teacher model
-    if args.train_loss == "classification" and args.block_ft_train_loss == "classification":
-        teacher_model = None
-    else:
-        teacher_model = copy.deepcopy(base_model)
-        teacher_model.to(args.device)
+           
+    # Load base models
+    if args.ds_in_train:
+        print(f"Training on downstream task {args.dataset}")
+        print(f"Creating Base model: {args.base_model}")
+        model_name = MODEL_PATH[args.base_model]["name"]
+        teacher_model_weight = DS_DEIT_PATH[args.base_model][args.dataset]
+        print(f"Loading pre-trained downstream deit model {teacher_model_weight}...")
+        teacher_model = create_model(
+            model_name=model_name, pretrained=False, num_classes=args.nb_classes, drop_rate=args.drop,
+            drop_path_rate=args.drop_path, drop_block_rate=None, img_size=args.input_size
+            )
         teacher_model = models.replace_attention(
             model=teacher_model, repl_blocks=args.replace, target="attn", 
             model_name=args.base_model
         )
-    
-    # Load and modify student model
-    if seq == 0:
-        if args.skip_train_attn:
-            if args.attn_weight == "":
-                student_weight = ATTN_PATH[args.scale]
-                print("Using default attention pretrained weight.")
-            else:
-                student_weight = args.attn_weight
-            student_model = torch.load(student_weight)
-        else:        
+        teacher_model = models.load_weight(teacher_model, teacher_model_weight)
+        args.init_with_pretrained = True
+        if args.init_with_pretrained:
+            student_model = copy.deepcopy(teacher_model)
+            imnet_weight = PRETRAINED_PATH[args.scale]
+            imnet_model = models.load_downstream_model(imnet_weight, args)
+            for blk_idx in args.replace:
+                student_model.blocks[blk_idx].attn = imnet_model.blocks[blk_idx].attn
+            del imnet_model
+        else:
+            student_model = copy.deepcopy(teacher_model)
             student_model = models.replace_attention(
-                model=base_model, repl_blocks=args.replace, target=args.rep_by, 
+                model=student_model, repl_blocks=args.replace, target=args.rep_by, 
                 model_name=args.base_model
             )
+            
+        teacher_model.to(args.device)   
+        student_model.to(args.device)   
+        
     else:
-        student_model = torch.load(args.interm_model)
-        student_model = models.replace_attention(
-            model=student_model, repl_blocks=args.replace, target=args.rep_by, 
-            model_name=args.base_model
-        )
+        print(f"Creating Base model: {args.base_model}")
+        model_name = MODEL_PATH[args.base_model]["name"]
+        if args.base_weight == "":
+            model_weight = MODEL_PATH[args.base_model]["weight"]
+            print("Using default model weight.")
+        else:
+            model_weight = args.base_weight
+        print(f"Using weight file {model_weight}")
+        base_model = create_model(
+            model_name=model_name, pretrained=False, num_classes=args.nb_classes, drop_rate=args.drop,
+            drop_path_rate=args.drop_path, drop_block_rate=None, img_size=args.input_size
+            )
+        base_model = models.load_weight(base_model, model_weight)
+        base_model.to(args.device)
+    
+        # Load and modify teacher model
+        if args.train_loss == "classification" and args.block_ft_train_loss == "classification":
+            teacher_model = None
+        else:
+            teacher_model = copy.deepcopy(base_model)
+            teacher_model.to(args.device)
+            teacher_model = models.replace_attention(
+                model=teacher_model, repl_blocks=args.replace, target="attn", 
+                model_name=args.base_model
+            )
+    
+        # Load and modify student model
+        if seq == 0:
+            if args.skip_train_attn:
+                if args.attn_weight == "":
+                    student_weight = ATTN_PATH[args.scale]
+                    print("Using default attention pretrained weight.")
+                else:
+                    student_weight = args.attn_weight
+                student_model = torch.load(student_weight)
+            else:        
+                student_model = models.replace_attention(
+                    model=base_model, repl_blocks=args.replace, target=args.rep_by, 
+                    model_name=args.base_model
+                )
+        else:
+            student_model = torch.load(args.interm_model)
+            student_model = models.replace_attention(
+                model=student_model, repl_blocks=args.replace, target=args.rep_by, 
+                model_name=args.base_model
+            )
+    # DDP wrap
     student_model.to(args.device)
     student_model_without_ddp = student_model
     if args.distributed:
         student_model = torch.nn.parallel.DistributedDataParallel(
             student_model, device_ids=[args.gpu], find_unused_parameters=True)
         student_model_without_ddp = student_model.module
+    try:
+        summary(student_model_without_ddp, depth=4, input_size=(1, 3, 224, 224))   
+    except: 
+        print("Unable to print model structure.")
         
     # Train attention part
     if not args.skip_train_attn:
@@ -680,7 +737,7 @@ def eval_trained_models(args, seq=0):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser("DeiT -> MLP Mixer", parents=[get_args_parser()])
+    parser = argparse.ArgumentParser("Attention replacement", parents=[get_args_parser()])
     args = parser.parse_args()
     if utils.get_rank() == 0:
         print(json.dumps({k: str(v) for k, v in vars(args).items()}, indent=4))

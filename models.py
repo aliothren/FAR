@@ -92,6 +92,50 @@ class LstmBlock(nn.Module):
         return out
 
 
+class MultiHeadLstmBlock(nn.Module):
+    def __init__(self, input_dim=192, head_num=3, hidden_dim=64, num_layers=1, dropout=0.1):
+        super(MultiHeadLstmBlock, self).__init__()
+        
+        mask_ih = get_block_mask(input_dim // head_num, hidden_dim, head_num)
+        mask_hh = get_block_mask(hidden_dim, hidden_dim, head_num)
+        # self.register_buffer('mask_ih', mask_ih)
+        # self.register_buffer('mask_hh', mask_hh)
+
+        self.input_dim = input_dim
+        self.head_num = head_num
+        self.output_dim = input_dim
+        self.hidden_dim = hidden_dim * head_num
+        self.pre_proj = nn.Linear(self.input_dim, self.input_dim)
+        self.token_norm = nn.LayerNorm(input_dim)
+        self.lstm = nn.LSTM(input_size=self.input_dim, hidden_size=self.hidden_dim, bidirectional=True,
+                            num_layers=num_layers, batch_first=True, dropout=dropout)
+        self.proj = nn.Linear(2*self.hidden_dim, self.output_dim)
+        
+        for name, param in self.lstm.named_parameters():
+            if 'weight_ih' in name:
+                param.data *= mask_ih
+            elif 'weight_hh' in name:
+                param.data *= mask_hh
+        
+    def forward(self, x):
+        # weight_ih = self.lstm.weight_ih_l0 * self.mask_ih
+        # weight_hh = self.lstm.weight_hh_l0 * self.mask_hh
+        # weight_ih_rev = self.lstm.weight_ih_l0_reverse * self.mask_ih
+        # weight_hh_rev = self.lstm.weight_hh_l0_reverse * self.mask_hh
+# 
+        # with torch.no_grad():
+        #     self.lstm.weight_ih_l0.copy_(weight_ih)
+        #     self.lstm.weight_hh_l0.copy_(weight_hh)
+        #     self.lstm.weight_ih_l0_reverse.copy_(weight_ih_rev)
+        #     self.lstm.weight_hh_l0_reverse.copy_(weight_hh_rev)
+            
+        x = self.token_norm(x) 
+        x = self.pre_proj(x)   
+        lstm_out, _ = self.lstm(x)
+        out = self.proj(lstm_out)
+        return out
+
+
 class AttnBlockWithOutput(nn.Module):
     """DeiT Block with shortcut"""
     def __init__(self, original_block):
@@ -150,6 +194,11 @@ def load_weight(model, weight):
     # print("Unexpected keys:", unexpected_keys)
     return model
 
+
+def get_block_mask(input_dim, hidden_dim, head_num):
+    blocks = [torch.ones(4 * hidden_dim, input_dim) for _ in range(head_num)]
+    return torch.block_diag(*blocks)
+
     
 def replace_attention(model, repl_blocks, target = None, model_name = ""):
     print(f"Replacing blocks: {repl_blocks}; Replace by: {target}")
@@ -166,8 +215,17 @@ def replace_attention(model, repl_blocks, target = None, model_name = ""):
             repl_block = AttnBlockWithOutput(block)
             lstm_block = LstmBlock(model_name)
             repl_block.attn = lstm_block
+        elif target == "multi-lstm":
+            input_dim = block.attn.qkv.in_features
+            num_heads = block.attn.num_heads
+            head_dim = block.attn.head_dim
+            if blk_index == 0:
+                print(f"Replacing setting: input_dim {input_dim}, num_heads {num_heads}, head_dim {head_dim}")
+            repl_block = AttnBlockWithOutput(block)
+            multi_lstm_block = MultiHeadLstmBlock(input_dim, num_heads, head_dim)
+            repl_block.attn = multi_lstm_block
         else:
-            raise NotImplementedError("Not available replace architecture (attn/mixer/lstm)")  
+            raise NotImplementedError("Not available replace architecture (attn/mixer/lstm/multi-lstm)")  
 
         repl_block.to(DEVICE)
         model.blocks[blk_index] = repl_block
