@@ -21,6 +21,15 @@ def apply_masks(model, multi_lstm=False, lstm_mask={}, reg=False, reg_mask={}):
                     param.grad.data.mul_(lstm_mask["mask_ih"].to(param.device))
                 elif 'weight_hh' in name:
                     param.grad.data.mul_(lstm_mask["mask_ih"].to(param.device))
+                elif 'head_proj.weight' in name:
+                    try:
+                        param.grad.data.mul_(lstm_mask["mask_head"].to(param.device))
+                    except:
+                        print("head_proj weight shape", model.blocks[0].attn.head_proj.weight.shape)  
+                        print("head_proj grad shape", model.blocks[0].attn.head_proj.weight.grad.shape)  
+                        print("head_proj mask shape", lstm_mask["mask_head"].shape)  
+                        exit(0)
+                    
     if reg:
         for name, param in model.named_parameters():
             if "module" in name:
@@ -212,8 +221,10 @@ def train_one_epoch(
                 output_teacher = teacher_model(samples)
                 loss = 0
                 for blk in replace:
-                    output_block_s = actual_model.blocks[blk].block_output
-                    output_block_t = actual_teacher.blocks[blk].block_output
+                    # output_block_s = actual_model.blocks[blk].block_output
+                    # output_block_t = actual_teacher.blocks[blk].block_output
+                    output_block_s = actual_model.blocks[blk].attn_output
+                    output_block_t = actual_teacher.blocks[blk].attn_output
                     loss += criterion(output_block_s, output_block_t)
                 
             elif loss_mode == "classification":
@@ -354,8 +365,9 @@ def train_model(
 
         mask_ih = architectures.get_block_mask(input_dim // head_num, hidden_dim, head_num)
         mask_hh = architectures.get_block_mask(hidden_dim, hidden_dim, head_num)
+        mask_head = architectures.get_head_mask(hidden_dim, head_num)
         use_multi_lstm_mask = True
-        lstm_mask={"mask_ih": mask_ih, "mask_hh": mask_hh}
+        lstm_mask={"mask_ih": mask_ih, "mask_hh": mask_hh, "mask_head": mask_head}
         print("Using multi-head LSTM masks.")
     # Use regularization mask in finetune after pruning
     if args.reg_in_train and mask:
@@ -394,10 +406,15 @@ def train_model(
         )
          
         with torch.no_grad():
-            num_zeros = (actual_model.blocks[0].attn.lstm.weight_ih_l0 == 0).sum().item()
-            total_elements = actual_model.blocks[0].attn.lstm.weight_ih_l0.numel()
-            zero_ratio = num_zeros / total_elements
-            print(f"[MASK CHECK] weight_ih_l0 zero ratio: {zero_ratio:.4f} ({num_zeros}/{total_elements})")   
+            num_zeros_wih = (actual_model.blocks[0].attn.lstm.weight_ih_l0 == 0).sum().item()
+            total_elements_wih = actual_model.blocks[0].attn.lstm.weight_ih_l0.numel()
+            zero_ratio_wih = num_zeros_wih / total_elements_wih
+            num_zeros_proj = (actual_model.blocks[0].attn.head_proj.weight == 0).sum().item()
+            total_elements_proj = actual_model.blocks[0].attn.head_proj.weight.numel()
+            zero_ratio_proj = num_zeros_proj / total_elements_proj
+            print(f"[MASK CHECK]\n \
+                    weight_ih_l0 zero ratio: {zero_ratio_wih:.4f} ({num_zeros_wih}/{total_elements_wih})\n \
+                    head_proj zero ratio: {zero_ratio_proj:.4f} ({num_zeros_proj}/{total_elements_proj})  ")   
                
         lr_scheduler.step(epoch)
         

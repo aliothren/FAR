@@ -145,7 +145,10 @@ def build_dataset(is_train, args):
         nb_classes = 10
         
     elif args.dataset == "IMNET":
-        root = os.path.join(args.data_path, "train" if is_train else "val")
+        if is_train:
+            root = os.path.join(args.data_path, "ILSVRC2012_img_train")
+        else:
+            root = "/home/u17/yuxinr/datasets/ILSVRC2012_img_val"
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 1000
         if is_train and args.train_subset < 1.0:

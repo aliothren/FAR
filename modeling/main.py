@@ -73,8 +73,7 @@ def train(args, seq=0):
             drop_path_rate=args.drop_path, drop_block_rate=None, img_size=args.input_size
             )
         teacher_model = architectures.replace_attention(
-            args=args, model=teacher_model, repl_blocks=args.replace, target="attn", 
-            model_name=args.base_model
+            args=args, model=teacher_model, repl_blocks=args.replace, target="attn"
         )
         teacher_model = architectures.load_weight(teacher_model, args.base_ds_weight)
         args.init_with_pretrained = True
@@ -87,9 +86,8 @@ def train(args, seq=0):
         else:
             student_model = copy.deepcopy(teacher_model)
             student_model = architectures.replace_attention(
-                args=args, model=student_model, repl_blocks=args.replace, target=args.rep_by, 
-                model_name=args.base_model
-            )
+                args=args, model=student_model, repl_blocks=args.replace, target=args.rep_by 
+                )
             
         teacher_model.to(args.device)   
         student_model.to(args.device)   
@@ -110,9 +108,8 @@ def train(args, seq=0):
             teacher_model = copy.deepcopy(base_model)
             teacher_model.to(args.device)
             teacher_model = architectures.replace_attention(
-                args=args, model=teacher_model, repl_blocks=args.replace, target="attn", 
-                model_name=args.base_model
-            )
+                args=args, model=teacher_model, repl_blocks=args.replace, target="attn"
+                )
     
         # Load and modify student model
         if seq == 0:
@@ -120,14 +117,12 @@ def train(args, seq=0):
                 student_model = torch.load(args.attn_weight)
             else:        
                 student_model = architectures.replace_attention(
-                    args=args, model=base_model, repl_blocks=args.replace, target=args.rep_by, 
-                    model_name=args.base_model
-                )
+                    args=args, model=base_model, repl_blocks=args.replace, target=args.rep_by
+                    )
         else:
             student_model = torch.load(args.interm_model)
             student_model = architectures.replace_attention(
-                args=args, model=student_model, repl_blocks=args.replace, target=args.rep_by, 
-                model_name=args.base_model
+                args=args, model=student_model, repl_blocks=args.replace, target=args.rep_by
             )
     # DDP wrap
     student_model.to(args.device)

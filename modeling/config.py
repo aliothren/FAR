@@ -7,11 +7,11 @@ from pathlib import Path
 ###### ----------- Global PATHs and configs ----------- ######
 # Path to datasets
 DATA_PATH = {
-    "IMNET": "",
-    "CIFAR100": "/home/yuxinr/far/data/cifar100",
-    "CIFAR10": "",
-    "FLOWER": "",
-    "CAR": "",
+    "IMNET": "/contrib/datasets/ILSVRC2012/",
+    "CIFAR100": "/home/u17/yuxinr/datasets/CIFAR100",
+    "CIFAR10": "/home/u17/yuxinr/datasets/CIFAR10",
+    "FLOWER": "/home/u17/yuxinr/datasets/Flowers102",
+    "CAR": "/home/u17/yuxinr/datasets/StanfordCars",
     }
 
 # Path to pretrained checkpoints of ATTENTION architecture models
@@ -89,7 +89,7 @@ VIS_MODEL_PATH = {
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BASE_DIR = "/home/yuxinr/far/FAR/"
+BASE_DIR = "/home/u17/yuxinr/FAR/FAR"
 
 
 ###### ----------- Parser utils ----------- ######
@@ -183,10 +183,10 @@ def get_common_parser():
     parser.add_argument("--device", default=DEVICE)
     parser.add_argument("--base-dir", default=BASE_DIR, help="Base output directory")
     parser.add_argument("--output-dir", default='', help="Output path, do NOT change here")
-    parser.add_argument('--num_workers', default=12, type=int)
+    parser.add_argument('--num_workers', default=8, type=int)
     parser.add_argument('--pin-mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
-    parser.set_defaults(pin_mem=True)
+    # parser.set_defaults(pin_mem=True)
     parser.add_argument("--random-seed", action="store_true", help="use random seed")
     parser.add_argument('--seed', default=42, type=int, help="Random seed")
     
