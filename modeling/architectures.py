@@ -4,22 +4,26 @@ from timm.models import create_model
 
 
 class MultiHeadLstm(nn.Module):
-    def __init__(self, input_dim=192, head_num=3, hidden_dim=64, num_layers=1, dropout=0.1):
+    def __init__(self, original_attn, num_layers=1, dropout=0.1):
         super(MultiHeadLstm, self).__init__()
+        self.input_dim = original_attn.qkv.in_features
+        self.head_num = original_attn.num_heads
+        self.hidden_dim = original_attn.head_dim * self.head_num
+        self.output_dim = self.input_dim
         
-        mask_ih = get_block_mask(input_dim // head_num, hidden_dim, head_num)
-        mask_hh = get_block_mask(hidden_dim, hidden_dim, head_num)
-        mask_head = get_head_mask(hidden_dim, head_num)
-        self.input_dim = input_dim
-        self.head_num = head_num
-        self.output_dim = input_dim
-        self.hidden_dim = hidden_dim * head_num
+        mask_ih = get_block_mask(self.input_dim // self.head_num, 
+                                 self.hidden_dim // self.head_num, 
+                                 self.head_num)
+        mask_hh = get_block_mask(self.hidden_dim // self.head_num,
+                                 self.hidden_dim // self.head_num,
+                                 self.head_num)
+        mask_head = get_head_mask(self.hidden_dim // self.head_num, self.head_num)
         self.pre_proj = nn.Linear(self.input_dim, self.input_dim)
-        self.token_norm = nn.LayerNorm(input_dim)
+        self.token_norm = nn.LayerNorm(self.input_dim)
         self.lstm = nn.LSTM(input_size=self.input_dim, hidden_size=self.hidden_dim, bidirectional=True,
                             num_layers=num_layers, batch_first=True, dropout=dropout)
         self.head_proj = nn.Linear(2*self.hidden_dim, self.hidden_dim)
-        self.post_proj = nn.Linear(self.hidden_dim, self.output_dim)
+        self.post_proj = original_attn.proj
         
         for name, param in self.named_parameters():
             if 'weight_ih' in name:
@@ -111,10 +115,7 @@ class BlockWithOutput(nn.Module):
         if target == "attn":
             self.attn = AttentionWithOutput(original_block.attn)
         elif target == "multi-lstm":
-            input_dim = original_block.attn.qkv.in_features
-            num_heads = original_block.attn.num_heads
-            head_dim = original_block.attn.head_dim
-            self.attn = MultiHeadLstm(input_dim, num_heads, head_dim)
+            self.attn = MultiHeadLstm(original_block.attn)
         else:
             raise NotImplementedError("Not available replace architecture (attn/multi-lstm)")  
         
@@ -173,24 +174,21 @@ def load_weight(model, weight):
     return model
 
 
-def get_block_mask(input_dim, hidden_dim, head_num):
-    in_per_head  = input_dim      # = 64
-    hid_per_head = hidden_dim     # = 64
-    H_total      = hid_per_head * head_num  # 192
-
-    mask = torch.zeros(4*H_total, input_dim*head_num)  # 768×192
+def get_block_mask(in_per_head, hid_per_head, head_num):
+    H_total = hid_per_head * head_num
+    mask = torch.zeros(4 * H_total, in_per_head * head_num)         # 768×192
     for h in range(head_num):
-        col = slice(h*in_per_head, (h+1)*in_per_head)
-        for g in range(4):  # i f g o
-            row = slice(g*H_total + h*hid_per_head,
-                         g*H_total + (h+1)*hid_per_head)
+        col = slice(h * in_per_head, (h + 1) * in_per_head)
+        for g in range(4):                                          # i f g o
+            row = slice(g * H_total + h * hid_per_head,
+                         g * H_total + (h + 1) * hid_per_head)
             mask[row, col] = 1.0
     return mask
 
 
-def get_head_mask(hidden_dim, head_num):
-    forward_mask  = torch.block_diag(*[torch.ones(hidden_dim, hidden_dim) for _ in range(head_num)])
-    backward_mask = torch.block_diag(*[torch.ones(hidden_dim, hidden_dim) for _ in range(head_num)])
+def get_head_mask(hid_per_head, head_num):
+    forward_mask  = torch.block_diag(*[torch.ones(hid_per_head, hid_per_head) for _ in range(head_num)])
+    backward_mask = torch.block_diag(*[torch.ones(hid_per_head, hid_per_head) for _ in range(head_num)])
     full_mask = torch.cat([forward_mask, backward_mask], dim=1)
     return full_mask  
 

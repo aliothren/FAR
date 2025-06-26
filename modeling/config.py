@@ -256,7 +256,7 @@ def get_modeling_parser():
                         help="Use pretrained attn part instead of train from scratch")
     parser.add_argument("--block-ft", action='store_true', 
                         help="Block-level finetune the replaced blocks after training attention")
-    parser.set_defaults(block_ft=True)
+    # parser.set_defaults(block_ft=True)
     parser.add_argument("--reg-in-train", action='store_true', 
                         help="Adding regularization in attn training")
     parser.add_argument("--init-with-pretrained", action='store_true', 

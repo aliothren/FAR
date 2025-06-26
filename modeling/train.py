@@ -219,29 +219,34 @@ def train_one_epoch(
                 criterion = CosineSimilarityLoss()
                 output_student = model(samples)
                 output_teacher = teacher_model(samples)
-                loss = 0
+                sim_loss = 0
+                cls_loss = 0
                 for blk in replace:
                     # output_block_s = actual_model.blocks[blk].block_output
                     # output_block_t = actual_teacher.blocks[blk].block_output
                     output_block_s = actual_model.blocks[blk].attn_output
                     output_block_t = actual_teacher.blocks[blk].attn_output
-                    loss += criterion(output_block_s, output_block_t)
+                    sim_loss += criterion(output_block_s, output_block_t)
                 
             elif loss_mode == "classification":
                 criterion = torch.nn.CrossEntropyLoss()
                 output_student = model(samples)
-                loss = criterion(output_student, targets)
+                sim_loss = 0
+                cls_loss  = criterion(output_student, targets)
                 
             elif loss_mode == "combine":
                 ce_criterion = torch.nn.CrossEntropyLoss()
                 cos_criterion = CosineSimilarityLoss()
                 output_student = model(samples)
                 output_teacher = teacher_model(samples)
-                loss = ce_criterion(output_student, targets)
+                sim_loss = 0
+                cls_loss = ce_criterion(output_student, targets)
                 for blk in replace:
-                    output_block_s = actual_model.blocks[blk].block_output
-                    output_block_t = actual_teacher.blocks[blk].block_output
-                    loss += cos_criterion(output_block_s, output_block_t)
+                    # output_block_s = actual_model.blocks[blk].block_output
+                    # output_block_t = actual_teacher.blocks[blk].block_output
+                    output_block_s = actual_model.blocks[blk].attn_output
+                    output_block_t = actual_teacher.blocks[blk].attn_output
+                    sim_loss += cos_criterion(output_block_s, output_block_t)
         
         # Calculate reg loss
         reg = 0.0
@@ -250,12 +255,15 @@ def train_one_epoch(
             if args.rep_by == "multi-lstm" and args.decay:
                 for block in actual_model.blocks:
                     reg += compute_lstm_reg_multihead(block, args, mode="reg")
+        loss = sim_loss + cls_loss
         if add_reg:
-            total_loss = loss + args.decay*reg
+            total_loss = loss + args.decay *reg
         else:
             total_loss = loss
            
         loss_value = loss.item()
+        cls_loss_value = cls_loss.item()
+        sim_loss_value = sim_loss.item()
         total_loss_value = total_loss.item()
 
         if not math.isfinite(total_loss_value):
@@ -274,6 +282,8 @@ def train_one_epoch(
         # Update logs
         metric_logger.update(total_loss=total_loss_value)
         metric_logger.update(loss=loss_value)
+        metric_logger.update(cls_loss=cls_loss_value)
+        metric_logger.update(sim_loss=sim_loss_value)
         metric_logger.update(reg=reg.item() if isinstance(reg, torch.Tensor) else reg)
         prec1, prec5 = reg_accuracy(output_student, targets, topk=(1, 5))
         metric_logger.update(prec1=prec1[0])
@@ -359,9 +369,9 @@ def train_model(
     reg_mask = {}
     # Use lstm mask when replace by multihead LSTMs, to imitate parallel LSTMs
     if args.rep_by == "multi-lstm":
-        input_dim = actual_model.blocks[0].attn.input_dim
-        head_num = actual_model.blocks[0].attn.head_num
-        hidden_dim = actual_model.blocks[0].attn.hidden_dim // head_num
+        input_dim = actual_model.blocks[args.replace[0]].attn.input_dim
+        head_num = actual_model.blocks[args.replace[0]].attn.head_num
+        hidden_dim = actual_model.blocks[args.replace[0]].attn.hidden_dim // head_num
 
         mask_ih = architectures.get_block_mask(input_dim // head_num, hidden_dim, head_num)
         mask_hh = architectures.get_block_mask(hidden_dim, hidden_dim, head_num)
@@ -406,11 +416,12 @@ def train_model(
         )
          
         with torch.no_grad():
-            num_zeros_wih = (actual_model.blocks[0].attn.lstm.weight_ih_l0 == 0).sum().item()
-            total_elements_wih = actual_model.blocks[0].attn.lstm.weight_ih_l0.numel()
+            blk_idx = args.replace[0]
+            num_zeros_wih = (actual_model.blocks[blk_idx].attn.lstm.weight_ih_l0 == 0).sum().item()
+            total_elements_wih = actual_model.blocks[blk_idx].attn.lstm.weight_ih_l0.numel()
             zero_ratio_wih = num_zeros_wih / total_elements_wih
-            num_zeros_proj = (actual_model.blocks[0].attn.head_proj.weight == 0).sum().item()
-            total_elements_proj = actual_model.blocks[0].attn.head_proj.weight.numel()
+            num_zeros_proj = (actual_model.blocks[blk_idx].attn.head_proj.weight == 0).sum().item()
+            total_elements_proj = actual_model.blocks[blk_idx].attn.head_proj.weight.numel()
             zero_ratio_proj = num_zeros_proj / total_elements_proj
             print(f"[MASK CHECK]\n \
                     weight_ih_l0 zero ratio: {zero_ratio_wih:.4f} ({num_zeros_wih}/{total_elements_wih})\n \
