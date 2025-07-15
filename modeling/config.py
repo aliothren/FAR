@@ -46,7 +46,7 @@ BASE_MODEL_DS_PATH = {
 
 # Path to pretrained checkpoints of FAR models
 FAR_MODEL_PATH = {
-    "DeiT-Tiny": "",
+    "DeiT-Tiny": "/home/u17/yuxinr/FAR/FAR/checkpoints/2025-06-30-05-10-13/model_block_seq0.pth",
     "DeiT-Small": "",
     "DeiT-Base": "",
     }
@@ -60,11 +60,17 @@ FAR_MODEL_PRUNED_PATH = {
 
 # Path to attention-trained-only checkpoints of FAR models
 FAR_MODEL_ATTN_ONLY_PATH = {
-    "DeiT-Tiny": "",
+    "DeiT-Tiny": "/home/u17/yuxinr/FAR/FAR/checkpoints/2025-06-30-05-10-13/model_block_seq0.pth",
     "DeiT-Small": "",
     "DeiT-Base": "",
 }
 
+# Path to concated FAR models with parallel trained blocks
+FAR_MODEL_CONCAT_PATH = {
+    "DeiT-Tiny": "/home/u17/yuxinr/FAR/FAR/checkpoints/concat_1.pth",
+    "DeiT-Small": "",
+    "DeiT-Base": "",
+}
 # Path to models to be visualized
 VIS_MODEL_PATH = {
     "DeiT-Tiny": {
@@ -162,13 +168,15 @@ def fill_default_args(args, full_arg=True):
         args.vis_model_name = VIS_MODEL_PATH[args.vis_model]["name"]
         print(f"Using default visualization model version {args.vis_model_name}")
 
-    if args.mode == "train" and args.ds_in_train:
-        if args.base_ds_weight == "":
+    if args.mode == "train":
+        if args.base_ds_weight == "" and args.ds_in_train:
             args.base_ds_weight = BASE_MODEL_DS_PATH[args.base_model][args.dataset]
             print(f"Using default downstreamed base model weight {args.base_ds_model}")
         if args.skip_train_attn and args.attn_weight == "":
             args.attn_weight = FAR_MODEL_ATTN_ONLY_PATH[args.base_model]
-    
+        if args.use_concat and args.concat_weight == "":
+            args.concat_weight = FAR_MODEL_CONCAT_PATH[args.base_model]
+        
     if args.mode == "prune":
         args.reg_in_train = True
 
@@ -240,6 +248,7 @@ def get_modeling_parser():
                         help="vis-model index name for attention base models, e.g.: deit_tiny_patch16_224")
     parser.add_argument("--vis-weight", default="", help="path of visualization target model checkpoint")
     parser.add_argument("--attn-weight", default="", help="path of attn part pretrained replace structure")
+    parser.add_argument("--concat-weight", default="", help="path of blockly pretrained and concated weight")
     
     # Running mode
     parser.add_argument("--mode", default="train", choices=["train", "eval", "finetune", "downstream", "prune"], 
@@ -254,6 +263,8 @@ def get_modeling_parser():
                         help="Structure used to replace attention")
     parser.add_argument("--skip-train-attn", action='store_true', 
                         help="Use pretrained attn part instead of train from scratch")
+    parser.add_argument("--use-concat", action='store_true', 
+                        help="Use concated pretrained blocks instead of train from scratch")
     parser.add_argument("--block-ft", action='store_true', 
                         help="Block-level finetune the replaced blocks after training attention")
     # parser.set_defaults(block_ft=True)

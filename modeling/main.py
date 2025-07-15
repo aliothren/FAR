@@ -115,6 +115,8 @@ def train(args, seq=0):
         if seq == 0:
             if args.skip_train_attn:
                 student_model = torch.load(args.attn_weight)
+            elif args.use_concat:
+                student_model = torch.load(args.concat_weight)
             else:        
                 student_model = architectures.replace_attention(
                     args=args, model=base_model, repl_blocks=args.replace, target=args.rep_by

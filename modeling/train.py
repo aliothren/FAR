@@ -219,8 +219,8 @@ def train_one_epoch(
                 criterion = CosineSimilarityLoss()
                 output_student = model(samples)
                 output_teacher = teacher_model(samples)
-                sim_loss = 0
-                cls_loss = 0
+                sim_loss = 0.0
+                cls_loss = 0.0
                 for blk in replace:
                     # output_block_s = actual_model.blocks[blk].block_output
                     # output_block_t = actual_teacher.blocks[blk].block_output
@@ -231,7 +231,7 @@ def train_one_epoch(
             elif loss_mode == "classification":
                 criterion = torch.nn.CrossEntropyLoss()
                 output_student = model(samples)
-                sim_loss = 0
+                sim_loss = 0.0
                 cls_loss  = criterion(output_student, targets)
                 
             elif loss_mode == "combine":
@@ -239,7 +239,7 @@ def train_one_epoch(
                 cos_criterion = CosineSimilarityLoss()
                 output_student = model(samples)
                 output_teacher = teacher_model(samples)
-                sim_loss = 0
+                sim_loss = 0.0
                 cls_loss = ce_criterion(output_student, targets)
                 for blk in replace:
                     # output_block_s = actual_model.blocks[blk].block_output
@@ -262,8 +262,8 @@ def train_one_epoch(
             total_loss = loss
            
         loss_value = loss.item()
-        cls_loss_value = cls_loss.item()
-        sim_loss_value = sim_loss.item()
+        cls_loss_value = cls_loss.item() if hasattr(cls_loss, "item") else cls_loss
+        sim_loss_value = sim_loss.item() if hasattr(sim_loss, "item") else sim_loss
         total_loss_value = total_loss.item()
 
         if not math.isfinite(total_loss_value):
