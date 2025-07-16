@@ -1,13 +1,14 @@
 import os
 import torch
-import config
-import architectures
 import matplotlib.pyplot as plt
 
 from pathlib import Path
-from data import load_dataset
 from timm.models import create_model
   
+from modeling import config
+from modeling import architectures
+from modeling.data import load_dataset
+
 
 def plot_heatmap(
     data: torch.Tensor, 

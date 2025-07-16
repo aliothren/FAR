@@ -1,4 +1,3 @@
-import sys
 import ast
 import json
 import onnx
@@ -7,10 +6,7 @@ import argparse
 import torch.onnx
 from pathlib import Path
 import data_config
-# load modeling evaluation set for testing accuracy
-modeling_dir = Path(__file__).resolve().parents[2] / "modeling"
-sys.path.insert(0, str(modeling_dir))
-from train import evaluate_model
+from modeling.train import evaluate_model
 
 
 def _get_args_parser():
@@ -24,7 +20,7 @@ def _get_args_parser():
 
 
 def _fill_default_args(args):
-    default_pth_path = Path("/home/yuxinr/far/FAR/checkpoints/2025-06-03-14-45-48/model_seq0_parallel.pth")
+    default_pth_path = Path("")
     default_onnx_path = Path(args.base_dir) / "hw_files" / "models" / "model.onnx"
     if args.pth_path == "":
         args.pth_path = default_pth_path

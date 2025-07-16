@@ -5,13 +5,18 @@ import datetime
 from pathlib import Path
 
 ###### ----------- Global PATHs and configs ----------- ######
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+BASE_DIR = "/home/u17/yuxinr/FAR/FAR"
+
 # Path to datasets
 DATA_PATH = {
-    "IMNET": "/contrib/datasets/ILSVRC2012/",
-    "CIFAR100": "/home/u17/yuxinr/datasets/CIFAR100",
-    "CIFAR10": "/home/u17/yuxinr/datasets/CIFAR10",
-    "FLOWER": "/home/u17/yuxinr/datasets/Flowers102",
-    "CAR": "/home/u17/yuxinr/datasets/StanfordCars",
+    "IMNET": "",
+    "CIFAR100": "",
+    "CIFAR10": "",
+    "FLOWER": "",
+    "CAR": "",
     }
 
 # Path to pretrained checkpoints of ATTENTION architecture models
@@ -46,7 +51,7 @@ BASE_MODEL_DS_PATH = {
 
 # Path to pretrained checkpoints of FAR models
 FAR_MODEL_PATH = {
-    "DeiT-Tiny": "/home/u17/yuxinr/FAR/FAR/checkpoints/2025-06-30-05-10-13/model_block_seq0.pth",
+    "DeiT-Tiny": "",
     "DeiT-Small": "",
     "DeiT-Base": "",
     }
@@ -60,14 +65,14 @@ FAR_MODEL_PRUNED_PATH = {
 
 # Path to attention-trained-only checkpoints of FAR models
 FAR_MODEL_ATTN_ONLY_PATH = {
-    "DeiT-Tiny": "/home/u17/yuxinr/FAR/FAR/checkpoints/2025-06-30-05-10-13/model_block_seq0.pth",
+    "DeiT-Tiny": "",
     "DeiT-Small": "",
     "DeiT-Base": "",
 }
 
 # Path to concated FAR models with parallel trained blocks
 FAR_MODEL_CONCAT_PATH = {
-    "DeiT-Tiny": "/home/u17/yuxinr/FAR/FAR/checkpoints/concat_1.pth",
+    "DeiT-Tiny": "",
     "DeiT-Small": "",
     "DeiT-Base": "",
 }
@@ -92,10 +97,6 @@ VIS_MODEL_PATH = {
         "weight":  "",
         },
     }
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-BASE_DIR = "/home/u17/yuxinr/FAR/FAR"
 
 
 ###### ----------- Parser utils ----------- ######

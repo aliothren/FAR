@@ -1,11 +1,11 @@
 import json
 import torch
-import config
 from pathlib import Path
 from copy import deepcopy
-from data import load_dataset
-from train import evaluate_model
-from architectures import ParallelLSTM, set_requires_grad
+from modeling import config
+from modeling.data import load_dataset
+from modeling.train import evaluate_model
+from modeling.architectures import ParallelLSTM, set_requires_grad
  
 
 def split_block_diag_weight(W, num_heads=3):
@@ -101,14 +101,13 @@ def assert_block_equal(big_blk, para_blk, tol=1e-5, device='cpu'):
     diff = (y_big - y_para).abs().max().item()
     print(f"diff_pre={diff_pre}")
     print(f"diff_lstm={diff_lstm}, diff={diff}")
-    # exit(0)
     assert diff < tol, f"block diff={diff}"
     return diff
 
 
 if __name__ == '__main__':
     # Modify multihead model and target parallel model path here
-    multi_path = Path("/home/yuxinr/far/FAR/modeling/checkpoints/2025-06-03-14-45-48/model_block_seq0.pth")
+    multi_path = Path("path/to/trained/model.pth")
     save_path = multi_path.with_name("model_parallel.pth")
     parser = config.get_common_parser()
     args = parser.parse_args()

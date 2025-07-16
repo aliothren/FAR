@@ -5,11 +5,9 @@ import json
 import argparse
 import data_config
 from pathlib import Path
-from onnx import shape_inference, helper, TensorProto, numpy_helper
+from onnx import helper, TensorProto
 from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"scripts"))
-import lstm_decompose
+from deploy.scripts import lstm_decompose
 
 
 def _get_args_parser():
@@ -23,7 +21,7 @@ def _get_args_parser():
 
 
 def _fill_default_args(args):
-    default_input_path = Path("/home/yuxinr/far/FAR/hw_files/models/model.onnx")
+    default_input_path = Path(args.base_dir) / "hw_files" / "models" / "model.onnx"
     default_decomposed_path = Path(args.base_dir) / "hw_files" / "models" / "model_decomposed.onnx"
     if args.input_path == "":
         args.input_path = default_input_path

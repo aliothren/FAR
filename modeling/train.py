@@ -6,11 +6,12 @@ import torch
 import utils
 import datetime
 import numpy as np
-import architectures
 
 from typing import Iterable
 from timm.utils import accuracy
-from loss import CosineSimilarityLoss
+
+from modeling import architectures
+from modeling.loss import CosineSimilarityLoss
 
 
 def apply_masks(model, multi_lstm=False, lstm_mask={}, reg=False, reg_mask={}):

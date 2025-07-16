@@ -9,7 +9,7 @@ from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 # Path to datasets
 DATA_PATH = {
     "IMNET": "",
-    "CIFAR100": "/home/yuxinr/far/data/cifar100",
+    "CIFAR100": "",
     "CIFAR10": "",
     "FLOWER": "",
     "CAR": "",
@@ -17,7 +17,7 @@ DATA_PATH = {
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BASE_DIR = "/home/yuxinr/far/FAR/"
+BASE_DIR = ""
 
 
 ###### ----------- Shared parsers for MX100 deploy ----------- ######

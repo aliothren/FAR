@@ -22,7 +22,7 @@ To train FAR models with multi-head LSTM replacing attention blocks:
 ### DeiT-Base:
 
 ```bash
-torchrun --nproc_per_node=4 --master-port=<PORT> main.py \
+torchrun --nproc_per_node=4 --master-port=<PORT> -m modeling/main \
   --distributed --mode train --rep-by multi-lstm \
   --base-model DeiT-Base --batch-size 64 --scale Base \
   --block-ft-lr 2e-5 --block-ft-batch-size 64 --skip-train-attn
@@ -31,7 +31,7 @@ torchrun --nproc_per_node=4 --master-port=<PORT> main.py \
 ### DeiT-Small:
 
 ```bash
-torchrun --nproc_per_node=4 --master-port=<PORT> main.py \
+torchrun --nproc_per_node=4 --master-port=<PORT> -m modeling/main \
   --distributed --mode train --rep-by multi-lstm \
   --base-model DeiT-Small --batch-size 64 --scale Small \
   --block-ft-lr 2e-5 --block-ft-batch-size 64 --skip-train-attn
@@ -40,7 +40,7 @@ torchrun --nproc_per_node=4 --master-port=<PORT> main.py \
 ### DeiT-Tiny:
 
 ```bash
-python3 main.py --mode train --rep-by multi-lstm
+python3 -m modeling/main --mode train --rep-by multi-lstm
 ```
 
 ## Pruning
@@ -50,7 +50,7 @@ To perform structured pruning on a trained model:
 ### Multi-GPU:
 
 ```bash
-torchrun --nproc_per_node=4 --master-port=<PORT> prune.py \
+torchrun --nproc_per_node=4 --master-port=<PORT> -m modeling/prune \
   --distributed --batch-size 64 --scale <Tiny|Small|Base> \
   --model-path <PATH_TO_MODEL>
 ```
@@ -58,7 +58,7 @@ torchrun --nproc_per_node=4 --master-port=<PORT> prune.py \
 ### Single GPU:
 
 ```bash
-python3 prune.py --scale <Tiny|Small|Base>
+python3 -m modeling/prune --scale <Tiny|Small|Base>
 ```
 
 ## Downstream Finetuning
@@ -66,7 +66,7 @@ python3 prune.py --scale <Tiny|Small|Base>
 Set `PRETRAINED_PATH_PRUNE` in `main.py` before launching:
 
 ```bash
-python3 main.py --mode downstream --scale <Tiny|Small|Base> --dataset <DATASET> \
+python3 -m modeling/main --mode downstream --scale <Tiny|Small|Base> --dataset <DATASET> \
   --lr 5e-5 --epochs 1000 --reprob 0.0 --drop-path 0.0
 ```
 
@@ -75,7 +75,7 @@ To finetune a pruned model:
 Set `PRETRAINED_PATH` in `main.py` and run:
 
 ```bash
-python3 main.py --mode downstream --ds-pruned --scale <Tiny|Small|Base> \
+python3 -m modeling/main --mode downstream --ds-pruned --scale <Tiny|Small|Base> \
   --dataset <DATASET> --lr 5e-5 --epochs 1000 --reprob 0.0 --drop-path 0.0
 ```
 
@@ -84,7 +84,7 @@ python3 main.py --mode downstream --ds-pruned --scale <Tiny|Small|Base> \
 To visualize token importance maps:
 
 ```bash
-python3 visualization.py
+python3 -m modeling/visualization
 ```
 
 ## Acknowledgements

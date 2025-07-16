@@ -18,6 +18,7 @@ This repository containes the full implementation of FAR.
         software implementation of FAR models
         including architechture design, training, evaluating, pruning, visualization, etc.
 ```
+Go into modeling/README.md to see more detailed instruction on FAR model training.
 
 
 ## Acknowledgements

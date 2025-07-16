@@ -5,16 +5,16 @@ import utils
 import torch
 import config
 import random
-import architectures
-import torch.nn.parallel
-
 import numpy as np
+import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 
-from data import load_dataset
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
-from train import train_model, evaluate_model, compute_lstm_reg_multihead
+
+from modeling import architectures
+from modeling.data import load_dataset
+from modeling.train import train_model, evaluate_model, compute_lstm_reg_multihead
 
 
 def prune(args, model, data_loader_val):

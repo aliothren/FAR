@@ -4,21 +4,20 @@ import json
 import torch
 import utils
 import random
-import config
-import architectures
-
 import numpy as np
 import torch.backends.cudnn as cudnn
 
-from data import load_dataset
-from train import train_model, evaluate_model
-
-from prune import prune
 from torchinfo import summary
 from timm.models import create_model
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 from peft import LoraConfig, get_peft_model, TaskType
+
+from modeling import config
+from modeling.prune import prune
+from modeling import architectures
+from modeling.data import load_dataset
+from modeling.train import train_model, evaluate_model
 
 
 def evaluate(args):
