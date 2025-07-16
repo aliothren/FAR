@@ -13,7 +13,7 @@ To install requirements:
 pip install -r requirements.txt
 ```
 
-We recommend Python 3.8+ with PyTorch ≥ 1.13. Training was tested on 8× A6000 GPUs and AMD EPYC 9254 CPUs.
+We recommend Python 3.9+ with PyTorch ≥ 1.13. Training was tested on 8× A6000 GPUs and AMD EPYC 9254 CPUs.
 
 ## Training
 

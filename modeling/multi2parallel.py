@@ -6,7 +6,7 @@ from modeling import config
 from modeling.data import load_dataset
 from modeling.train import evaluate_model
 from modeling.architectures import ParallelLSTM, set_requires_grad
- 
+
 
 def split_block_diag_weight(W, num_heads=3):
     """
@@ -29,68 +29,84 @@ def split_block_diag_bias(b, num_heads=3):
     b: [4*H*num_heads]  → 3 * [4*H]
     """
     H = b.shape[0] // (4 * num_heads)
-    return [b[i*4*H:(i+1)*4*H].clone() for i in range(num_heads)]
+    return [b[i * 4 * H : (i + 1) * 4 * H].clone() for i in range(num_heads)]
 
 
 def convert_block(multi_blk: torch.nn.Module):
     """multi_blk is MultiHeadLstmBlock instance"""
-    D          = multi_blk.input_dim
+    D = multi_blk.input_dim
     H_per_head = multi_blk.hidden_dim // multi_blk.head_num
-    H_heads    = multi_blk.head_num
+    H_heads = multi_blk.head_num
 
     # create new parallel LSTM , share pre_proj / token_norm / proj
     para_blk = ParallelLSTM(
         input_dim=D,
         hidden_dim=H_per_head,
         num_heads=H_heads,
-        proj        = deepcopy(multi_blk.proj),
-        pre_proj    = deepcopy(multi_blk.pre_proj),
-        token_norm  = deepcopy(multi_blk.token_norm),
-        dropout     = 0.0,      
+        proj=deepcopy(multi_blk.proj),
+        pre_proj=deepcopy(multi_blk.pre_proj),
+        token_norm=deepcopy(multi_blk.token_norm),
+        dropout=0.0,
     )
 
     def w_slice(W, head_idx, H_per_head, head_num):
         H_total = H_per_head * head_num
-        cols = slice(head_idx * H_per_head, (head_idx + 1) * H_per_head)    
+        cols = slice(head_idx * H_per_head, (head_idx + 1) * H_per_head)
         parts = []
         for g in range(4):
             row_start = g * H_total + head_idx * H_per_head
-            row_end   = row_start + H_per_head
-            parts.append(W[row_start:row_end, cols])    
-        return torch.cat(parts, dim=0)    
-        
+            row_end = row_start + H_per_head
+            parts.append(W[row_start:row_end, cols])
+        return torch.cat(parts, dim=0)
+
     def b_slice(b, head_idx, H_per_head, head_num):
         H_total = H_per_head * head_num
         parts = []
-        for g in range(4):                           # i, f, g, o
+        for g in range(4):  # i, f, g, o
             start = g * H_total + head_idx * H_per_head
-            end   = start + H_per_head
+            end = start + H_per_head
             parts.append(b[start:end])
-        return torch.cat(parts, dim=0).clone()   
- 
-    multi_lstm  = multi_blk.lstm
+        return torch.cat(parts, dim=0).clone()
+
+    multi_lstm = multi_blk.lstm
     for i, single_lstm in enumerate(para_blk.lstms):
         # 正向
-        single_lstm.weight_ih_l0.data.copy_(w_slice(multi_lstm.weight_ih_l0, i, H_per_head, H_heads))
-        single_lstm.weight_hh_l0.data.copy_(w_slice(multi_lstm.weight_hh_l0, i, H_per_head, H_heads))
-        single_lstm.bias_ih_l0 .data.copy_(b_slice(multi_lstm.bias_ih_l0,  i, H_per_head, H_heads))
-        single_lstm.bias_hh_l0 .data.copy_(b_slice(multi_lstm.bias_hh_l0,  i, H_per_head, H_heads))
+        single_lstm.weight_ih_l0.data.copy_(
+            w_slice(multi_lstm.weight_ih_l0, i, H_per_head, H_heads)
+        )
+        single_lstm.weight_hh_l0.data.copy_(
+            w_slice(multi_lstm.weight_hh_l0, i, H_per_head, H_heads)
+        )
+        single_lstm.bias_ih_l0.data.copy_(
+            b_slice(multi_lstm.bias_ih_l0, i, H_per_head, H_heads)
+        )
+        single_lstm.bias_hh_l0.data.copy_(
+            b_slice(multi_lstm.bias_hh_l0, i, H_per_head, H_heads)
+        )
         # 反向
-        single_lstm.weight_ih_l0_reverse.data.copy_(w_slice(multi_lstm.weight_ih_l0_reverse, i, H_per_head, H_heads))
-        single_lstm.weight_hh_l0_reverse.data.copy_(w_slice(multi_lstm.weight_hh_l0_reverse, i, H_per_head, H_heads))
-        single_lstm.bias_ih_l0_reverse .data.copy_(b_slice(multi_lstm.bias_ih_l0_reverse,  i, H_per_head, H_heads))
-        single_lstm.bias_hh_l0_reverse .data.copy_(b_slice(multi_lstm.bias_hh_l0_reverse,  i, H_per_head, H_heads))
+        single_lstm.weight_ih_l0_reverse.data.copy_(
+            w_slice(multi_lstm.weight_ih_l0_reverse, i, H_per_head, H_heads)
+        )
+        single_lstm.weight_hh_l0_reverse.data.copy_(
+            w_slice(multi_lstm.weight_hh_l0_reverse, i, H_per_head, H_heads)
+        )
+        single_lstm.bias_ih_l0_reverse.data.copy_(
+            b_slice(multi_lstm.bias_ih_l0_reverse, i, H_per_head, H_heads)
+        )
+        single_lstm.bias_hh_l0_reverse.data.copy_(
+            b_slice(multi_lstm.bias_hh_l0_reverse, i, H_per_head, H_heads)
+        )
 
     return para_blk
 
 
-def assert_block_equal(big_blk, para_blk, tol=1e-5, device='cpu'):
+def assert_block_equal(big_blk, para_blk, tol=1e-5, device="cpu"):
     big_blk, para_blk = big_blk.to(device), para_blk.to(device)
     big_blk.eval()
     para_blk.eval()
     x = torch.randn(2, 197, big_blk.input_dim, device=device)
     with torch.no_grad():
-        y_big  = big_blk(x)
+        y_big = big_blk(x)
         y_para = para_blk(x)
         pre_big = big_blk.pre_proj_out
         pre_para = para_blk.pre_proj_out
@@ -105,7 +121,7 @@ def assert_block_equal(big_blk, para_blk, tol=1e-5, device='cpu'):
     return diff
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Modify multihead model and target parallel model path here
     multi_path = Path("path/to/trained/model.pth")
     save_path = multi_path.with_name("model_parallel.pth")
@@ -121,7 +137,7 @@ if __name__ == '__main__':
     multi_model = torch.load(multi_path, map_location="cpu")
 
     # Evaluate multihead lstm model
-    multi_model.eval()   
+    multi_model.eval()
     set_requires_grad(multi_model, target_blocks=[])
     multi_model.to(args.device)
     test_stats = evaluate_model(data_loader_val, args.device, multi_model)

@@ -78,9 +78,7 @@ def _patch_output_type(original_model, new_model):
     """Fix lack of output shape of decomposed model, by copy output parameters from the original model.
     Inputs: original (not decomposed) model, target (decomposed) model
     Output: decomposed model"""
-    original_output_info = {
-        out.name: out.type for out in original_model.graph.output
-    }
+    original_output_info = {out.name: out.type for out in original_model.graph.output}
 
     for out in new_model.graph.output:
         if out.name in original_output_info:
@@ -115,11 +113,10 @@ def decompose_lstm(input_model):
         }
         for attr in lstm_node.attribute:
             if attr.name in allowed_model_attributes:
-                assert onnx.helper.get_attribute_value(
-                    attr
-                ) in allowed_model_attributes[
-                    attr.name
-                ], "Attribute {}: {} not supported".format(
+                assert (
+                    onnx.helper.get_attribute_value(attr)
+                    in allowed_model_attributes[attr.name]
+                ), "Attribute {}: {} not supported".format(
                     attr.name, onnx.helper.get_attribute_value(attr)
                 )
                 if attr.name == "direction":
@@ -136,7 +133,7 @@ def decompose_lstm(input_model):
         W = model_network.convert_initializer_to_np_array(lstm_node.input[1])
         R = model_network.convert_initializer_to_np_array(lstm_node.input[2])
         B = model_network.convert_initializer_to_np_array(lstm_node.input[3])
-        if direction == b"forward": 
+        if direction == b"forward":
             new_lstm = lstm_forward_model(W, R, B).to_model_proto()
         elif direction == b"bidirectional":
             new_lstm = lstm_bidirectional_model(W, R, B).to_model_proto()
@@ -249,34 +246,42 @@ def lstm_forward_model(W, R, B):
         shape_X = op.Shape(X)
         seq_length = op.Gather(shape_X, op.Constant(value=0))
 
-        H_t = initial_h[0]                                                                  # [B, H]
+        H_t = initial_h[0]  # [B, H]
         C_t = initial_c[0]
-        shape_H_T = op.Shape(op.Unsqueeze(H_t, axes=[0]))                                   # [1] -> [1, B, H]
-        shape_index = op.Shape(op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]))         # [1] -> [1, 1, B, H]
-        shape_Y = op.Concat(op.Unsqueeze(seq_length, axes=[0]), shape_H_T, axis=0)          # [1] -> [S, 1, B, H]
-        Y = op.Expand(op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]), shape_Y)         # [S, 1, B, H]
+        shape_H_T = op.Shape(op.Unsqueeze(H_t, axes=[0]))  # [1] -> [1, B, H]
+        shape_index = op.Shape(
+            op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0])
+        )  # [1] -> [1, 1, B, H]
+        shape_Y = op.Concat(
+            op.Unsqueeze(seq_length, axes=[0]), shape_H_T, axis=0
+        )  # [1] -> [S, 1, B, H]
+        Y = op.Expand(
+            op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]), shape_Y
+        )  # [S, 1, B, H]
 
         for t in range(seq_length):
             X_t = X[t]
-            concat_X_H = op.Concat(X_t, H_t, axis=1)                                        # [B, I+H]
+            concat_X_H = op.Concat(X_t, H_t, axis=1)  # [B, I+H]
             i_t = op.Sigmoid(op.Gemm(concat_X_H, WR_i_T, WRb_i))
             f_t = op.Sigmoid(op.Gemm(concat_X_H, WR_f_T, WRb_f))
             c_t = op.Tanh(op.Gemm(concat_X_H, WR_c_T, WRb_c))
-            C_t = f_t * C_t + i_t * c_t                                                     # [B, H]
-            o_t = op.Sigmoid(op.Gemm(concat_X_H, WR_o_T, WRb_o))                            # [B, H]
-            H_t = o_t * op.Tanh(C_t)                                                        # [B, H]
+            C_t = f_t * C_t + i_t * c_t  # [B, H]
+            o_t = op.Sigmoid(op.Gemm(concat_X_H, WR_o_T, WRb_o))  # [B, H]
+            H_t = o_t * op.Tanh(C_t)  # [B, H]
             t_broadcast = op.Expand(
-                op.Reshape(t, op.Constant(value=np.array([1], dtype=np.int64))),            # [1] -> [t]
-                shape_index,                                                                # [1] -> [1, 1, B, H]
-            )                                                                               # [1, 1, B, H]
+                op.Reshape(
+                    t, op.Constant(value=np.array([1], dtype=np.int64))
+                ),  # [1] -> [t]
+                shape_index,  # [1] -> [1, 1, B, H]
+            )  # [1, 1, B, H]
             Y = op.ScatterElements(
-                Y,                                                                          # [S, 1, B, H]
-                t_broadcast,                                                                # [1, 1, B, H]
-                op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]),                        # [1, 1, B, H]
+                Y,  # [S, 1, B, H]
+                t_broadcast,  # [1, 1, B, H]
+                op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]),  # [1, 1, B, H]
                 axis=0,
             )
 
-        Y_h = op.Unsqueeze(H_t, axes=[0])                                                   # [1, B, H]
+        Y_h = op.Unsqueeze(H_t, axes=[0])  # [1, B, H]
         Y_c = op.Unsqueeze(C_t, axes=[0])
 
         return Y, Y_h, Y_c
@@ -315,10 +320,10 @@ def lstm_bidirectional_model(W, R, B):
         - Y_h: Final hidden state of shape (2, batch_size, hidden_size).
         - Y_c: Final cell state of shape (2, batch_size, hidden_size).
     """
-    W, WB = np.split(W, 2, axis=0)                                              # [1, 4H, I]
-    W_i, W_o, W_f, W_c = np.split(np.squeeze(W, axis=0), 4, axis=0)             # [H, I]
+    W, WB = np.split(W, 2, axis=0)  # [1, 4H, I]
+    W_i, W_o, W_f, W_c = np.split(np.squeeze(W, axis=0), 4, axis=0)  # [H, I]
     WB_i, WB_o, WB_f, WB_c = np.split(np.squeeze(WB, axis=0), 4, axis=0)
-    W_i_T_np, W_o_T_np, W_f_T_np, W_c_T_np = (                                  # [I, H]
+    W_i_T_np, W_o_T_np, W_f_T_np, W_c_T_np = (  # [I, H]
         np.transpose(W_i),
         np.transpose(W_o),
         np.transpose(W_f),
@@ -331,10 +336,10 @@ def lstm_bidirectional_model(W, R, B):
         np.transpose(WB_c),
     )
 
-    R, RB = np.split(R, 2, axis=0)                                              # [1, 4H, H]
-    R_i, R_o, R_f, R_c = np.split(np.squeeze(R, axis=0), 4, axis=0)             # [H, H]
+    R, RB = np.split(R, 2, axis=0)  # [1, 4H, H]
+    R_i, R_o, R_f, R_c = np.split(np.squeeze(R, axis=0), 4, axis=0)  # [H, H]
     RB_i, RB_o, RB_f, RB_c = np.split(np.squeeze(RB, axis=0), 4, axis=0)
-    R_i_T_np, R_o_T_np, R_f_T_np, R_c_T_np = (                                  # [H, H]
+    R_i_T_np, R_o_T_np, R_f_T_np, R_c_T_np = (  # [H, H]
         np.transpose(R_i),
         np.transpose(R_o),
         np.transpose(R_f),
@@ -346,23 +351,23 @@ def lstm_bidirectional_model(W, R, B):
         np.transpose(RB_f),
         np.transpose(RB_c),
     )
-    B, BB = np.split(B, 2, axis=0)                                              # [1, 8H]
+    B, BB = np.split(B, 2, axis=0)  # [1, 8H]
     Wb_i_np, Wb_o_np, Wb_f_np, Wb_c_np, Rb_i_np, Rb_o_np, Rb_f_np, Rb_c_np = np.split(
         np.squeeze(B, axis=0), 8, axis=0
-    )                                                                           # [H]
-    WBb_i_np, WBb_o_np, WBb_f_np, WBb_c_np, RBb_i_np, RBb_o_np, RBb_f_np, RBb_c_np = np.split(
-        np.squeeze(BB, axis=0), 8, axis=0
+    )  # [H]
+    WBb_i_np, WBb_o_np, WBb_f_np, WBb_c_np, RBb_i_np, RBb_o_np, RBb_f_np, RBb_c_np = (
+        np.split(np.squeeze(BB, axis=0), 8, axis=0)
     )
 
     @script()
     def lstm_bidirectional(
-        X: FLOAT[SEQ_LENGTH_STR, BATCH_SIZE_STR, INPUT_SIZE_STR],                           # [S, B, I]
-        initial_h: FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],                               # [2, B, H]
-        initial_c: FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],                               # [2, B, H]
+        X: FLOAT[SEQ_LENGTH_STR, BATCH_SIZE_STR, INPUT_SIZE_STR],  # [S, B, I]
+        initial_h: FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [2, B, H]
+        initial_c: FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [2, B, H]
     ) -> tuple[
-        FLOAT[SEQ_LENGTH_STR, 2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],                          # [S, 2, B, H]
-        FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],                                          # [2, B, H]
-        FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],                                          # [2, B, H]
+        FLOAT[SEQ_LENGTH_STR, 2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [S, 2, B, H]
+        FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [2, B, H]
+        FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [2, B, H]
     ]:
         WR_i_T = op.Constant(value=np.vstack((W_i_T_np, R_i_T_np)).astype(np.float32))
         WR_o_T = op.Constant(value=np.vstack((W_o_T_np, R_o_T_np)).astype(np.float32))
@@ -373,10 +378,18 @@ def lstm_bidirectional_model(W, R, B):
         WRb_f = op.Constant(value=(Wb_f_np + Rb_f_np).astype(np.float32))
         WRb_c = op.Constant(value=(Wb_c_np + Rb_c_np).astype(np.float32))
 
-        WRB_i_T = op.Constant(value=np.vstack((WB_i_T_np, RB_i_T_np)).astype(np.float32))
-        WRB_o_T = op.Constant(value=np.vstack((WB_o_T_np, RB_o_T_np)).astype(np.float32))
-        WRB_f_T = op.Constant(value=np.vstack((WB_f_T_np, RB_f_T_np)).astype(np.float32))
-        WRB_c_T = op.Constant(value=np.vstack((WB_c_T_np, RB_c_T_np)).astype(np.float32))
+        WRB_i_T = op.Constant(
+            value=np.vstack((WB_i_T_np, RB_i_T_np)).astype(np.float32)
+        )
+        WRB_o_T = op.Constant(
+            value=np.vstack((WB_o_T_np, RB_o_T_np)).astype(np.float32)
+        )
+        WRB_f_T = op.Constant(
+            value=np.vstack((WB_f_T_np, RB_f_T_np)).astype(np.float32)
+        )
+        WRB_c_T = op.Constant(
+            value=np.vstack((WB_c_T_np, RB_c_T_np)).astype(np.float32)
+        )
         WRBb_i = op.Constant(value=(WBb_i_np + RBb_i_np).astype(np.float32))
         WRBb_o = op.Constant(value=(WBb_o_np + RBb_o_np).astype(np.float32))
         WRBb_f = op.Constant(value=(WBb_f_np + RBb_f_np).astype(np.float32))
@@ -385,29 +398,31 @@ def lstm_bidirectional_model(W, R, B):
         shape_X = op.Shape(X)
         seq_length = op.Gather(shape_X, op.Constant(value=0))
 
-        H_t_forward, H_t_backward = initial_h[0], initial_h[1]                              # [B, H]
-        C_t_forward, C_t_backward = initial_c[0], initial_c[1]                              # [B, H]
-        shape_H_T = op.Shape(op.Unsqueeze(H_t_forward, axes=[0]))                           # DIM=1 -> [1, B, H]
+        H_t_forward, H_t_backward = initial_h[0], initial_h[1]  # [B, H]
+        C_t_forward, C_t_backward = initial_c[0], initial_c[1]  # [B, H]
+        shape_H_T = op.Shape(op.Unsqueeze(H_t_forward, axes=[0]))  # DIM=1 -> [1, B, H]
         shape_index = op.Shape(
             op.Unsqueeze(op.Unsqueeze(H_t_forward, axes=[0]), axes=[0])
-        )                                                                                   # DIM=1 -> [1, 1, B, H]
+        )  # DIM=1 -> [1, 1, B, H]
         Y_shape = op.Concat(op.Unsqueeze(seq_length, axes=[0]), shape_H_T, axis=0)
-        Y_forward  = op.ConstantOfShape(Y_shape)
+        Y_forward = op.ConstantOfShape(Y_shape)
         Y_backward = op.ConstantOfShape(Y_shape)
 
         for t in range(seq_length):
-            X_t_forward = X[t]                                                              # [B, I]
-            concat_X_H_forward = op.Concat(X_t_forward, H_t_forward, axis=1)                # [B, I+H]
+            X_t_forward = X[t]  # [B, I]
+            concat_X_H_forward = op.Concat(X_t_forward, H_t_forward, axis=1)  # [B, I+H]
             i_t_forward = op.Sigmoid(op.Gemm(concat_X_H_forward, WR_i_T, WRb_i))
             f_t_forward = op.Sigmoid(op.Gemm(concat_X_H_forward, WR_f_T, WRb_f))
             c_t_forward = op.Tanh(op.Gemm(concat_X_H_forward, WR_c_T, WRb_c))
-            C_t_forward = f_t_forward * C_t_forward + i_t_forward * c_t_forward             # [B, H]
+            C_t_forward = (
+                f_t_forward * C_t_forward + i_t_forward * c_t_forward
+            )  # [B, H]
             o_t_forward = op.Sigmoid(op.Gemm(concat_X_H_forward, WR_o_T, WRb_o))
-            H_t_forward = o_t_forward * op.Tanh(C_t_forward)                                # [B, H]
+            H_t_forward = o_t_forward * op.Tanh(C_t_forward)  # [B, H]
             t_broadcast_forward = op.Expand(
                 op.Reshape(t, op.Constant(value=np.array([1], dtype=np.int64))),
                 shape_index,
-            ) 
+            )
             Y_forward = op.ScatterElements(
                 Y_forward,
                 t_broadcast_forward,
@@ -415,12 +430,14 @@ def lstm_bidirectional_model(W, R, B):
                 axis=0,
             )
 
-        batch_size = op.Gather(op.Shape(X), op.Constant(value=1))        # B
-        seq_lens   = op.Expand(op.Unsqueeze(seq_length, axes=[0]),       # [1] → [B]
-                               op.Unsqueeze(batch_size, axes=[0]))
-        X_backward = op.ReverseSequence(X, seq_lens, batch_axis=1, time_axis=0)  
+        batch_size = op.Gather(op.Shape(X), op.Constant(value=1))  # B
+        seq_lens = op.Expand(
+            op.Unsqueeze(seq_length, axes=[0]),  # [1] → [B]
+            op.Unsqueeze(batch_size, axes=[0]),
+        )
+        X_backward = op.ReverseSequence(X, seq_lens, batch_axis=1, time_axis=0)
         for t in range(seq_length):
-            X_t_backward = X_backward[t]                              # X[-t - 1]
+            X_t_backward = X_backward[t]  # X[-t - 1]
             concat_X_H_backward = op.Concat(X_t_backward, H_t_backward, axis=1)
             i_t_backward = op.Sigmoid(op.Gemm(concat_X_H_backward, WRB_i_T, WRBb_i))
             f_t_backward = op.Sigmoid(op.Gemm(concat_X_H_backward, WRB_f_T, WRBb_f))
@@ -428,9 +445,11 @@ def lstm_bidirectional_model(W, R, B):
             C_t_backward = f_t_backward * C_t_backward + i_t_backward * c_t_backward
             o_t_backward = op.Sigmoid(op.Gemm(concat_X_H_backward, WRB_o_T, WRBb_o))
             H_t_backward = o_t_backward * op.Tanh(C_t_backward)
-            t_backward = op.Sub(op.Sub(seq_length, t), op.Constant(value=1)) 
+            t_backward = op.Sub(op.Sub(seq_length, t), op.Constant(value=1))
             t_broadcast_backward = op.Expand(
-                op.Reshape(t_backward, op.Constant(value=np.array([1], dtype=np.int64))),
+                op.Reshape(
+                    t_backward, op.Constant(value=np.array([1], dtype=np.int64))
+                ),
                 shape_index,
             )
             Y_backward = op.ScatterElements(
@@ -439,18 +458,18 @@ def lstm_bidirectional_model(W, R, B):
                 op.Unsqueeze(op.Unsqueeze(H_t_backward, axes=[0]), axes=[0]),
                 axis=0,
             )
-        
+
         Y = op.Concat(Y_forward, Y_backward, axis=1)
         Y_h = op.Concat(
-                op.Unsqueeze(H_t_forward, axes=[0]), 
-                op.Unsqueeze(H_t_backward, axes=[0]), 
-                axis=0
-            )                                                # [2, B, H]
+            op.Unsqueeze(H_t_forward, axes=[0]),
+            op.Unsqueeze(H_t_backward, axes=[0]),
+            axis=0,
+        )  # [2, B, H]
         Y_c = op.Concat(
-                op.Unsqueeze(C_t_forward, axes=[0]), 
-                op.Unsqueeze(C_t_backward, axes=[0]), 
-                axis=0
-            )
+            op.Unsqueeze(C_t_forward, axes=[0]),
+            op.Unsqueeze(C_t_backward, axes=[0]),
+            axis=0,
+        )
 
         return Y, Y_h, Y_c
 
@@ -483,7 +502,7 @@ def main():
     onnx.checker.check_model(input_model)
     new_onnx_model = decompose_lstm(input_model)
     onnx.checker.check_model(new_onnx_model)
-    
+
     for node in new_onnx_model.graph.node:
         if node.op_type == "Constant" and "blocks.0" in node.name:
             for attr in node.attribute:

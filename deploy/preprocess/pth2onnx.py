@@ -10,12 +10,20 @@ from modeling.train import evaluate_model
 
 
 def _get_args_parser():
-    parser = argparse.ArgumentParser("Convert .pth model file to ONNX model", add_help=False)
+    parser = argparse.ArgumentParser(
+        "Convert .pth model file to ONNX model", add_help=False
+    )
     parser.add_argument("--pth-path", default="", help="Input .pth model path")
-    parser.add_argument("--input-shape", type=ast.literal_eval, default="(1,3,224,224)",
-                         help="Model input shape, default: (1,3,224,224)")
-    parser.add_argument("--onnx-path",default="", help="Output ONNX model path")
-    parser.add_argument("--batch-size", default=256, type=int, help="Batchsize used in accuracy tests")
+    parser.add_argument(
+        "--input-shape",
+        type=ast.literal_eval,
+        default="(1,3,224,224)",
+        help="Model input shape, default: (1,3,224,224)",
+    )
+    parser.add_argument("--onnx-path", default="", help="Output ONNX model path")
+    parser.add_argument(
+        "--batch-size", default=256, type=int, help="Batchsize used in accuracy tests"
+    )
     return parser
 
 
@@ -28,13 +36,15 @@ def _fill_default_args(args):
     if args.onnx_path == "":
         args.onnx_path = default_onnx_path
         print(f"Using default output ONNX path {args.onnx_path}")
-    
+
     return args
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(".pth model to ONNX model", 
-                                     parents=[data_config.get_common_parser(), _get_args_parser()])
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        ".pth model to ONNX model",
+        parents=[data_config.get_common_parser(), _get_args_parser()],
+    )
     args = parser.parse_args()
     args = _fill_default_args(args)
     args = data_config.fill_default_common_args(args)

@@ -19,8 +19,16 @@ from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 
 class INatDataset(ImageFolder):
-    def __init__(self, root, train=True, year=2018, transform=None, target_transform=None,
-                 category='name', loader=default_loader):
+    def __init__(
+        self,
+        root,
+        train=True,
+        year=2018,
+        transform=None,
+        target_transform=None,
+        category="name",
+        loader=default_loader,
+    ):
         self.transform = transform
         self.loader = loader
         self.target_transform = target_transform
@@ -30,7 +38,7 @@ class INatDataset(ImageFolder):
         with open(path_json) as json_file:
             data = json.load(json_file)
 
-        with open(os.path.join(root, 'categories.json')) as json_file:
+        with open(os.path.join(root, "categories.json")) as json_file:
             data_catg = json.load(json_file)
 
         path_json_for_targeter = os.path.join(root, f"train{year}.json")
@@ -40,18 +48,18 @@ class INatDataset(ImageFolder):
 
         targeter = {}
         indexer = 0
-        for elem in data_for_targeter['annotations']:
+        for elem in data_for_targeter["annotations"]:
             king = []
-            king.append(data_catg[int(elem['category_id'])][category])
+            king.append(data_catg[int(elem["category_id"])][category])
             if king[0] not in targeter.keys():
                 targeter[king[0]] = indexer
                 indexer += 1
         self.nb_classes = len(targeter)
 
         self.samples = []
-        for elem in data['images']:
-            path_current = os.path.join(root, elem['file_name'])
-            target_current = int(elem['file_name'].split('/')[2])
+        for elem in data["images"]:
+            path_current = os.path.join(root, elem["file_name"])
+            target_current = int(elem["file_name"].split("/")[2])
 
             categors = data_catg[target_current]
             target_current_true = targeter[categors[category]]
@@ -67,7 +75,7 @@ class Flowers102Dataset(Dataset):
         self.transform = transform
 
         labels_path = os.path.join(root, "imagelabels.mat")
-        labels = scipy.io.loadmat(labels_path)["labels"][0] - 1 
+        labels = scipy.io.loadmat(labels_path)["labels"][0] - 1
 
         image_dir = os.path.join(root, "jpg")
         image_files = sorted(os.listdir(image_dir))
@@ -78,7 +86,9 @@ class Flowers102Dataset(Dataset):
         split_data = scipy.io.loadmat(split_path)
 
         if train:
-            split_indices = np.concatenate((split_data["trnid"][0], split_data["valid"][0])) - 1
+            split_indices = (
+                np.concatenate((split_data["trnid"][0], split_data["valid"][0])) - 1
+            )
         else:
             split_indices = split_data["tstid"][0] - 1
 
@@ -110,7 +120,7 @@ class StanfordCarsDataset(Dataset):
         train_path = "cars_train/cars_train/"
         test_path = "cars_test/cars_test/"
         img_folder = os.path.join(root, train_path if train else test_path)
-        
+
         xls = pd.ExcelFile(file_path)
         df = xls.parse("train" if train else "test")
 
@@ -139,11 +149,11 @@ def build_dataset(is_train, args):
     if args.dataset == "CIFAR100":
         dataset = datasets.CIFAR100(args.data_path, train=is_train, transform=transform)
         nb_classes = 100
-        
+
     elif args.dataset == "CIFAR10":
         dataset = datasets.CIFAR10(args.data_path, train=is_train, transform=transform)
         nb_classes = 10
-        
+
     elif args.dataset == "IMNET":
         if is_train:
             root = os.path.join(args.data_path, "ILSVRC2012_img_train")
@@ -153,28 +163,42 @@ def build_dataset(is_train, args):
         nb_classes = 1000
         if is_train and args.train_subset < 1.0:
             labels = np.array([dataset.targets[i] for i in range(len(dataset))])
-            sss = StratifiedShuffleSplit(n_splits=1, train_size=args.train_subset, random_state=42)
+            sss = StratifiedShuffleSplit(
+                n_splits=1, train_size=args.train_subset, random_state=42
+            )
             indices, _ = next(sss.split(np.zeros(len(labels)), labels))
             dataset = Subset(dataset, indices)
-            
+
     elif args.dataset == "INAT18":
-        dataset = INatDataset(args.data_path, train=is_train, year=2018,
-                              category=args.inat_category, transform=transform)
-        nb_classes = dataset.nb_classes
-        
-    elif args.dataset == "INAT19":
-        dataset = INatDataset(args.data_path, train=is_train, year=2019,
-                              category=args.inat_category, transform=transform)
+        dataset = INatDataset(
+            args.data_path,
+            train=is_train,
+            year=2018,
+            category=args.inat_category,
+            transform=transform,
+        )
         nb_classes = dataset.nb_classes
 
-    elif args.dataset == 'FLOWER':
+    elif args.dataset == "INAT19":
+        dataset = INatDataset(
+            args.data_path,
+            train=is_train,
+            year=2019,
+            category=args.inat_category,
+            transform=transform,
+        )
+        nb_classes = dataset.nb_classes
+
+    elif args.dataset == "FLOWER":
         dataset = Flowers102Dataset(args.data_path, train=is_train, transform=transform)
         nb_classes = 102
 
-    elif args.dataset == 'CAR':
-        dataset = StanfordCarsDataset(args.data_path, train=is_train, transform=transform)
+    elif args.dataset == "CAR":
+        dataset = StanfordCarsDataset(
+            args.data_path, train=is_train, transform=transform
+        )
         nb_classes = 196
-        
+
     return dataset, nb_classes
 
 
@@ -195,15 +219,16 @@ def build_transform(is_train, args):
         if not resize_im:
             # replace RandomResizedCropAndInterpolation with
             # RandomCrop
-            transform.transforms[0] = transforms.RandomCrop(
-                args.input_size, padding=4)
+            transform.transforms[0] = transforms.RandomCrop(args.input_size, padding=4)
         return transform
 
     t = []
     if resize_im:
         size = int(args.input_size / args.eval_crop_ratio)
         t.append(
-            transforms.Resize(size, interpolation=3),  # to maintain same ratio w.r.t. 224 images
+            transforms.Resize(
+                size, interpolation=3
+            ),  # to maintain same ratio w.r.t. 224 images
         )
         t.append(transforms.CenterCrop(args.input_size))
 
@@ -216,40 +241,47 @@ def load_dataset(args, mode):
     if mode == "train":
         print(f"Loading training dataset {args.dataset}")
         dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-        
+
         if args.distributed:
             num_tasks = utils.get_world_size()
             global_rank = utils.get_rank()
             if args.repeated_aug:
                 sampler_train = RASampler(
-                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                    dataset_train,
+                    num_replicas=num_tasks,
+                    rank=global_rank,
+                    shuffle=True,
                 )
             else:
                 sampler_train = torch.utils.data.DistributedSampler(
-                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                    dataset_train,
+                    num_replicas=num_tasks,
+                    rank=global_rank,
+                    shuffle=True,
                 )
         else:
             sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        
+
         data_loader_train = torch.utils.data.DataLoader(
-            dataset_train, sampler=sampler_train,
+            dataset_train,
+            sampler=sampler_train,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=True,
         )
         return data_loader_train
-    
+
     elif mode == "val":
         print(f"Loading validation dataset {args.dataset}")
         dataset_val, args.nb_classes = build_dataset(is_train=False, args=args)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
         data_loader_val = torch.utils.data.DataLoader(
-            dataset_val, sampler=sampler_val,
+            dataset_val,
+            sampler=sampler_val,
             batch_size=int(1.5 * args.batch_size),
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
-            drop_last=False
+            drop_last=False,
         )
         return data_loader_val, dataset_val
-

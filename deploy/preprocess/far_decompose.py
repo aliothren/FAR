@@ -1,4 +1,3 @@
-import sys
 import ast
 import onnx
 import json
@@ -11,30 +10,43 @@ from deploy.scripts import lstm_decompose
 
 
 def _get_args_parser():
-    parser = argparse.ArgumentParser("Decompose LSTM nodes in default ONNX model.", add_help=False)
+    parser = argparse.ArgumentParser(
+        "Decompose LSTM nodes in default ONNX model.", add_help=False
+    )
     parser.add_argument("--input-path", default="", help="Input .pth model path")
-    parser.add_argument("--input-shape", type=ast.literal_eval, default="(1,3,224,224)",
-                         help="Model input shape, default: (1,3,224,224)")
-    parser.add_argument("--decompose-path",default="", help="Output ONNX model path")
-    parser.add_argument("--batch-size", default=256, type=int, help="Batchsize used in accuracy tests")
+    parser.add_argument(
+        "--input-shape",
+        type=ast.literal_eval,
+        default="(1,3,224,224)",
+        help="Model input shape, default: (1,3,224,224)",
+    )
+    parser.add_argument("--decompose-path", default="", help="Output ONNX model path")
+    parser.add_argument(
+        "--batch-size", default=256, type=int, help="Batchsize used in accuracy tests"
+    )
     return parser
 
 
 def _fill_default_args(args):
     default_input_path = Path(args.base_dir) / "hw_files" / "models" / "model.onnx"
-    default_decomposed_path = Path(args.base_dir) / "hw_files" / "models" / "model_decomposed.onnx"
+    default_decomposed_path = (
+        Path(args.base_dir) / "hw_files" / "models" / "model_decomposed.onnx"
+    )
     if args.input_path == "":
         args.input_path = default_input_path
         print(f"Using default input .pth path {args.input_path}")
     if args.decompose_path == "":
         args.decompose_path = default_decomposed_path
         print(f"Using default output ONNX path {args.decompose_path}")
-    
+
     return args
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser("LSTM nodes decompose.", 
-                                     parents=[data_config.get_common_parser(), _get_args_parser()])
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        "LSTM nodes decompose.",
+        parents=[data_config.get_common_parser(), _get_args_parser()],
+    )
     args = parser.parse_args()
     args = _fill_default_args(args)
     args = data_config.fill_default_common_args(args)
