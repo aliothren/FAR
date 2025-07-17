@@ -1,3 +1,10 @@
+"""
+This is a template for configuration file.
+Please don't modify this file.
+Use `cp config_template.py config.py` to get a personal copy,
+and fill in paths in the personalized file.
+"""
+
 import torch
 import fcntl
 import argparse
@@ -8,7 +15,7 @@ from pathlib import Path
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BASE_DIR = "/home/u17/yuxinr/FAR/FAR"
+BASE_DIR = ""
 
 # Path to datasets
 DATA_PATH = {
@@ -17,6 +24,8 @@ DATA_PATH = {
     "CIFAR10": "",
     "FLOWER": "",
     "CAR": "",
+    "INAT18": "",
+    "INAT19": "",
 }
 
 # Path to pretrained checkpoints of ATTENTION architecture models
@@ -38,13 +47,29 @@ BASE_MODEL_PATH = {
 # Path to downstreamed checkpoints of ATTENTION architecture models
 BASE_MODEL_DS_PATH = {
     "DeiT-Tiny": {
-        "CIFAR10": "/benchmodels/deit/tiny_cifar10.pth",
-        "CIFAR100": "/benchmodels/deit/tiny_cifar100.pth",
-        "FLOWER": "/benchmodels/deit/tiny_flower.pth",
-        "CAR": "/benchmodels/deit/tiny_car.pth",
+        "CIFAR10": "",
+        "CIFAR100": "",
+        "FLOWER": "",
+        "CAR": "",
+        "INAT18": "",
+        "INAT19": "",
     },
-    "DeiT-Small": {},
-    "DeiT-Base": {},
+    "DeiT-Small": {
+        "CIFAR10": "",
+        "CIFAR100": "",
+        "FLOWER": "",
+        "CAR": "",
+        "INAT18": "",
+        "INAT19": "",
+    },
+    "DeiT-Base": {
+        "CIFAR10": "",
+        "CIFAR100": "",
+        "FLOWER": "",
+        "CAR": "",
+        "INAT18": "",
+        "INAT19": "",
+    },
 }
 
 # Path to pretrained checkpoints of FAR models

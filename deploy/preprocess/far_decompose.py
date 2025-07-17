@@ -4,7 +4,6 @@ import json
 import argparse
 import data_config
 from pathlib import Path
-from onnx import helper, TensorProto
 from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
 from deploy.scripts import lstm_decompose
 
@@ -75,27 +74,4 @@ if __name__ == "__main__":
     print("Evaluating decomposed model...")
     data_config.evaluate_onnx_model(args.decompose_path, data_loader_val)
 
-    # Patch empty loop cond
-    print("Patching decomposed model...")
-    const_node = helper.make_node(
-        "Constant",
-        inputs=[],
-        outputs=["_const_true_for_loop_cond"],
-        value=helper.make_tensor(
-            name="_const_true_for_loop_cond" + "_lit",
-            data_type=TensorProto.BOOL,
-            dims=[],  # scalar
-            vals=[True],
-        ),
-        name="_const_true_for_loop_cond" + "_node",
-    )
-    decomposed_model.graph.node.insert(0, const_node)
-    patched = 0
-    for node in decomposed_model.graph.node:
-        if node.op_type != "Loop":
-            continue
-        if len(node.input) >= 2 and node.input[1] == "":
-            node.input[1] = "_const_true_for_loop_cond"
-            patched += 1
-    print(f"{patched} nodes with empty loop condition fixed")
     inferred_model = SymbolicShapeInference.infer_shapes(decomposed_model, verbose=2)

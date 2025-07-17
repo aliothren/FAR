@@ -15,8 +15,8 @@ import numpy as np
 import onnx
 from onnxscript import FLOAT, script
 from onnxscript import opset14 as op
-from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
-from rustwork_onnx import ModelNetwork, SubgraphTemplate
+
+from common.rustwork_onnx import ModelNetwork, SubgraphTemplate
 
 SEQ_LENGTH_STR = "seq_length"
 BATCH_SIZE_STR = "batch_size"
@@ -74,17 +74,41 @@ def _rename_subgraph_outputs(graph, old_name, new_name):
                     node.output[output_index] = new_name
 
 
+def _add_cond_to_loop(graph):
+    """Adds constant boolean cond to loop to allow for symbolic shape inference"""
+    patched_num = 0
+    for node in graph.node:
+        if node.op_type == "Loop":
+            node.input[1] = node.name + "_cond"
+            graph.initializer.append(
+                onnx.helper.make_tensor(
+                    name=node.name + "_cond",
+                    data_type=onnx.TensorProto.BOOL,
+                    dims=[1],
+                    vals=[True],
+                )
+            )
+            patched_num += 1
+    print(f"Patched {patched_num} empty loops condition as True")
+
+
 def _patch_output_type(original_model, new_model):
-    """Fix lack of output shape of decomposed model, by copy output parameters from the original model.
+    """Fix possible lack of output shape of decomposed model,
+    by copy output parameters from the original model.
     Inputs: original (not decomposed) model, target (decomposed) model
     Output: decomposed model"""
     original_output_info = {out.name: out.type for out in original_model.graph.output}
 
     for out in new_model.graph.output:
-        if out.name in original_output_info:
-            out.type.CopyFrom(original_output_info[out.name])
-        else:
+        if out.name not in original_output_info:
             print(f"Warning: output {out.name} not found in original model.")
+            continue
+        if (
+            not out.type.HasField("tensor_type")
+            or not out.type.tensor_type.HasField("shape")
+            or len(out.type.tensor_type.shape.dim) == 0
+        ):
+            out.type.CopyFrom(original_output_info[out.name])
 
     return new_model
 
@@ -102,7 +126,9 @@ def decompose_lstm(input_model):
     for i, match in enumerate(matched_graphs):
         lstm_node = match.get_node_data(0).onnx_node
 
-        allowed_model_attributes = {
+        # Check LSTM op attributes and optional inputs are supported
+        # TODO: Add support for other attributes and optional inputs
+        required_model_attributes = {
             "activation_alpha": [None],
             "activation_beta": [None],
             "activations": [[b"Sigmoid", b"Tanh", b"Tanh"]],
@@ -112,15 +138,15 @@ def decompose_lstm(input_model):
             "layout": [0],
         }
         for attr in lstm_node.attribute:
-            if attr.name in allowed_model_attributes:
+            if attr.name in required_model_attributes:
                 assert (
                     onnx.helper.get_attribute_value(attr)
-                    in allowed_model_attributes[attr.name]
+                    in required_model_attributes[attr.name]
                 ), "Attribute {}: {} not supported".format(
                     attr.name, onnx.helper.get_attribute_value(attr)
                 )
                 if attr.name == "direction":
-                    direction = onnx.helper.get_attribute_value(attr)
+                    lstm_direction = onnx.helper.get_attribute_value(attr)
         assert lstm_node.input[3], "B (bias tensor) must be provided"
         assert not lstm_node.input[4], "sequence_lens not supported"
         assert lstm_node.input[5], "initial_h must be provided"
@@ -133,10 +159,11 @@ def decompose_lstm(input_model):
         W = model_network.convert_initializer_to_np_array(lstm_node.input[1])
         R = model_network.convert_initializer_to_np_array(lstm_node.input[2])
         B = model_network.convert_initializer_to_np_array(lstm_node.input[3])
-        if direction == b"forward":
+        if lstm_direction == b"forward":
             new_lstm = lstm_forward_model(W, R, B).to_model_proto()
-        elif direction == b"bidirectional":
+        elif lstm_direction == b"bidirectional":
             new_lstm = lstm_bidirectional_model(W, R, B).to_model_proto()
+
         output_names = [output_info.name for output_info in new_lstm.graph.output]
 
         # Rename LSTM with suffix
@@ -170,6 +197,9 @@ def decompose_lstm(input_model):
         model_network.substitute_matched_graph(match, new_lstm)
 
     new_onnx_model = model_network.as_onnx_model_proto()
+    # Add cond to loop
+    _add_cond_to_loop(new_onnx_model.graph)
+    # Add output type if missing
     new_onnx_model = _patch_output_type(input_model, new_onnx_model)
     onnx.checker.check_model(new_onnx_model)
     return new_onnx_model
@@ -180,7 +210,7 @@ def lstm_forward_model(W, R, B):
     Constructs a decomposed forward LSTM. Takes the weight, recurrence and bias tensors
     and saves them as constants. Returns OnnxFunction with internal operations of
     LSTM as separate nodes.
-    TODO: add support for backward and bidirectional LSTM
+    TODO: This only works for forward LSTM, add support for backward LSTM
 
     Parameters
     ----------
@@ -246,42 +276,34 @@ def lstm_forward_model(W, R, B):
         shape_X = op.Shape(X)
         seq_length = op.Gather(shape_X, op.Constant(value=0))
 
-        H_t = initial_h[0]  # [B, H]
+        H_t = initial_h[0]
         C_t = initial_c[0]
-        shape_H_T = op.Shape(op.Unsqueeze(H_t, axes=[0]))  # [1] -> [1, B, H]
-        shape_index = op.Shape(
-            op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0])
-        )  # [1] -> [1, 1, B, H]
-        shape_Y = op.Concat(
-            op.Unsqueeze(seq_length, axes=[0]), shape_H_T, axis=0
-        )  # [1] -> [S, 1, B, H]
-        Y = op.Expand(
-            op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]), shape_Y
-        )  # [S, 1, B, H]
+        shape_H_T = op.Shape(op.Unsqueeze(H_t, axes=[0]))
+        shape_index = op.Shape(op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]))
+        shape_Y = op.Concat(op.Unsqueeze(seq_length, axes=[0]), shape_H_T, axis=0)
+        Y = op.Expand(op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]), shape_Y)
 
         for t in range(seq_length):
             X_t = X[t]
-            concat_X_H = op.Concat(X_t, H_t, axis=1)  # [B, I+H]
+            concat_X_H = op.Concat(X_t, H_t, axis=1)
             i_t = op.Sigmoid(op.Gemm(concat_X_H, WR_i_T, WRb_i))
             f_t = op.Sigmoid(op.Gemm(concat_X_H, WR_f_T, WRb_f))
             c_t = op.Tanh(op.Gemm(concat_X_H, WR_c_T, WRb_c))
-            C_t = f_t * C_t + i_t * c_t  # [B, H]
-            o_t = op.Sigmoid(op.Gemm(concat_X_H, WR_o_T, WRb_o))  # [B, H]
-            H_t = o_t * op.Tanh(C_t)  # [B, H]
+            C_t = f_t * C_t + i_t * c_t
+            o_t = op.Sigmoid(op.Gemm(concat_X_H, WR_o_T, WRb_o))
+            H_t = o_t * op.Tanh(C_t)
             t_broadcast = op.Expand(
-                op.Reshape(
-                    t, op.Constant(value=np.array([1], dtype=np.int64))
-                ),  # [1] -> [t]
-                shape_index,  # [1] -> [1, 1, B, H]
-            )  # [1, 1, B, H]
+                op.Reshape(t, op.Constant(value=np.array([1], dtype=np.int64))),
+                shape_index,
+            )
             Y = op.ScatterElements(
-                Y,  # [S, 1, B, H]
-                t_broadcast,  # [1, 1, B, H]
-                op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]),  # [1, 1, B, H]
+                Y,
+                t_broadcast,
+                op.Unsqueeze(op.Unsqueeze(H_t, axes=[0]), axes=[0]),
                 axis=0,
             )
 
-        Y_h = op.Unsqueeze(H_t, axes=[0])  # [1, B, H]
+        Y_h = op.Unsqueeze(H_t, axes=[0])
         Y_c = op.Unsqueeze(C_t, axes=[0])
 
         return Y, Y_h, Y_c
@@ -291,10 +313,11 @@ def lstm_forward_model(W, R, B):
 
 def lstm_bidirectional_model(W, R, B):
     """
-    Constructs a decomposed bidirectional LSTM. Takes the weight, recurrence and bias tensors
-    and saves them as constants. Returns OnnxFunction with internal operations of
-    LSTM as separate nodes.
-    TODO: add support for backward and bidirectional LSTM
+    Constructs a decomposed bidirectional LSTM.
+    Takes the weight, recurrence and bias tensors and saves them as constants.
+    Returns OnnxFunction with internal operations of LSTM as separate nodes.
+    Each bidirectional LSTM will be decomposed into 2 loops,
+    for forward part and backward part separately.
 
     Parameters
     ----------
@@ -361,13 +384,13 @@ def lstm_bidirectional_model(W, R, B):
 
     @script()
     def lstm_bidirectional(
-        X: FLOAT[SEQ_LENGTH_STR, BATCH_SIZE_STR, INPUT_SIZE_STR],  # [S, B, I]
-        initial_h: FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [2, B, H]
-        initial_c: FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [2, B, H]
+        X: FLOAT[SEQ_LENGTH_STR, BATCH_SIZE_STR, INPUT_SIZE_STR],
+        initial_h: FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],
+        initial_c: FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],
     ) -> tuple[
-        FLOAT[SEQ_LENGTH_STR, 2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [S, 2, B, H]
-        FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [2, B, H]
-        FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],  # [2, B, H]
+        FLOAT[SEQ_LENGTH_STR, 2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],
+        FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],
+        FLOAT[2, BATCH_SIZE_STR, HIDDEN_SIZE_STR],
     ]:
         WR_i_T = op.Constant(value=np.vstack((W_i_T_np, R_i_T_np)).astype(np.float32))
         WR_o_T = op.Constant(value=np.vstack((W_o_T_np, R_o_T_np)).astype(np.float32))
@@ -398,12 +421,12 @@ def lstm_bidirectional_model(W, R, B):
         shape_X = op.Shape(X)
         seq_length = op.Gather(shape_X, op.Constant(value=0))
 
-        H_t_forward, H_t_backward = initial_h[0], initial_h[1]  # [B, H]
-        C_t_forward, C_t_backward = initial_c[0], initial_c[1]  # [B, H]
-        shape_H_T = op.Shape(op.Unsqueeze(H_t_forward, axes=[0]))  # DIM=1 -> [1, B, H]
+        H_t_forward, H_t_backward = initial_h[0], initial_h[1]
+        C_t_forward, C_t_backward = initial_c[0], initial_c[1]
+        shape_H_T = op.Shape(op.Unsqueeze(H_t_forward, axes=[0]))
         shape_index = op.Shape(
             op.Unsqueeze(op.Unsqueeze(H_t_forward, axes=[0]), axes=[0])
-        )  # DIM=1 -> [1, 1, B, H]
+        )
         Y_shape = op.Concat(op.Unsqueeze(seq_length, axes=[0]), shape_H_T, axis=0)
         Y_forward = op.ConstantOfShape(Y_shape)
         Y_backward = op.ConstantOfShape(Y_shape)
@@ -414,9 +437,7 @@ def lstm_bidirectional_model(W, R, B):
             i_t_forward = op.Sigmoid(op.Gemm(concat_X_H_forward, WR_i_T, WRb_i))
             f_t_forward = op.Sigmoid(op.Gemm(concat_X_H_forward, WR_f_T, WRb_f))
             c_t_forward = op.Tanh(op.Gemm(concat_X_H_forward, WR_c_T, WRb_c))
-            C_t_forward = (
-                f_t_forward * C_t_forward + i_t_forward * c_t_forward
-            )  # [B, H]
+            C_t_forward = f_t_forward * C_t_forward + i_t_forward * c_t_forward
             o_t_forward = op.Sigmoid(op.Gemm(concat_X_H_forward, WR_o_T, WRb_o))
             H_t_forward = o_t_forward * op.Tanh(C_t_forward)  # [B, H]
             t_broadcast_forward = op.Expand(
@@ -430,14 +451,14 @@ def lstm_bidirectional_model(W, R, B):
                 axis=0,
             )
 
-        batch_size = op.Gather(op.Shape(X), op.Constant(value=1))  # B
+        batch_size = op.Gather(op.Shape(X), op.Constant(value=1))
         seq_lens = op.Expand(
-            op.Unsqueeze(seq_length, axes=[0]),  # [1] → [B]
+            op.Unsqueeze(seq_length, axes=[0]),
             op.Unsqueeze(batch_size, axes=[0]),
         )
         X_backward = op.ReverseSequence(X, seq_lens, batch_axis=1, time_axis=0)
         for t in range(seq_length):
-            X_t_backward = X_backward[t]  # X[-t - 1]
+            X_t_backward = X_backward[t]
             concat_X_H_backward = op.Concat(X_t_backward, H_t_backward, axis=1)
             i_t_backward = op.Sigmoid(op.Gemm(concat_X_H_backward, WRB_i_T, WRBb_i))
             f_t_backward = op.Sigmoid(op.Gemm(concat_X_H_backward, WRB_f_T, WRBb_f))
@@ -464,7 +485,7 @@ def lstm_bidirectional_model(W, R, B):
             op.Unsqueeze(H_t_forward, axes=[0]),
             op.Unsqueeze(H_t_backward, axes=[0]),
             axis=0,
-        )  # [2, B, H]
+        )
         Y_c = op.Concat(
             op.Unsqueeze(C_t_forward, axes=[0]),
             op.Unsqueeze(C_t_backward, axes=[0]),
@@ -501,20 +522,7 @@ def main():
     input_model = onnx.load(args.input_model_path)
     onnx.checker.check_model(input_model)
     new_onnx_model = decompose_lstm(input_model)
-    onnx.checker.check_model(new_onnx_model)
-
-    for node in new_onnx_model.graph.node:
-        if node.op_type == "Constant" and "blocks.0" in node.name:
-            for attr in node.attribute:
-                if attr.name == "value":
-                    try:
-                        val = onnx.numpy_helper.to_array(attr.t)
-                        print(f"{node.output[0]}: {val.shape} {val.dtype}")
-                    except Exception as e:
-                        print(f"[Error] Constant node {node.output[0]}: {e}")
-    # new_onnx_model = onnx.shape_inference.infer_shapes(new_onnx_model)
-    inferred_model = SymbolicShapeInference.infer_shapes(new_onnx_model, verbose=2)
-    onnx.save(inferred_model, args.output_model_path)
+    onnx.save(new_onnx_model, args.output_model_path)
 
 
 if __name__ == "__main__":
