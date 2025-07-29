@@ -21,9 +21,12 @@ class MultiHeadLstm(nn.Module):
             self.hidden_dim // self.head_num,
             self.head_num,
         )
-        mask_head = get_head_mask(self.hidden_dim // self.head_num, self.head_num)
+        mask_head = get_head_mask(
+            self.hidden_dim // self.head_num, 
+            self.head_num
+        )
+
         self.pre_proj = nn.Linear(self.input_dim, self.input_dim)
-        self.token_norm = nn.LayerNorm(self.input_dim)
         self.lstm = nn.LSTM(
             input_size=self.input_dim,
             hidden_size=self.hidden_dim,
@@ -209,8 +212,8 @@ def load_weight(model, weight):
     missing_keys, unexpected_keys = model.load_state_dict(
         checkpoint_model, strict=False
     )
-    # print("Missing keys:", missing_keys)
-    # print("Unexpected keys:", unexpected_keys)
+    print("Missing keys:", missing_keys)
+    print("Unexpected keys:", unexpected_keys)
     return model
 
 
@@ -271,10 +274,10 @@ def set_requires_grad(
     # Global fintune when transfer to downstream datasets
     if mode == "downstream":
         if target_part == "full":
-            for name, param in model.named_parameters():
+            for name, param in raw_model.named_parameters():
                 param.requires_grad = trainable
         elif target_part == "FC":
-            for name, param in model.named_parameters():
+            for name, param in raw_model.named_parameters():
                 param.requires_grad = not trainable
                 if any(target in name for target in target_names):
                     if "mlp" in name:
@@ -284,7 +287,7 @@ def set_requires_grad(
                 param.requires_grad = True
                 print(name)
         elif target_part == "FC+head":
-            for name, param in model.named_parameters():
+            for name, param in raw_model.named_parameters():
                 param.requires_grad = not trainable
                 if any(target in name for target in target_names):
                     if "mlp" in name:
@@ -295,20 +298,20 @@ def set_requires_grad(
                 print(name)
 
     elif mode == "prune":
-        for name, param in model.named_parameters():
+        for name, param in raw_model.named_parameters():
             param.requires_grad = trainable
 
     elif mode == "finetune":
         # turn the classification head to trainable
         if target_part == "head":
-            for param in model.parameters():
+            for param in raw_model.parameters():
                 param.requires_grad = False
             for name, param in raw_model.head.named_parameters():
                 param.requires_grad = True
                 print(name)
         # turn the whole blocks to trainable
         elif target_part == "sequential":
-            for name, param in model.named_parameters():
+            for name, param in raw_model.named_parameters():
                 param.requires_grad = not trainable
                 if any(target in name for target in target_names):
                     param.requires_grad = trainable
@@ -316,15 +319,18 @@ def set_requires_grad(
 
     elif mode == "train":
         # turn the whole block to trainable
-        if target_part == "block":
-            for name, param in model.named_parameters():
+        if target_part == "full":
+            for name, param in raw_model.named_parameters():
+                param.requires_grad = trainable
+        elif target_part == "block":
+            for name, param in raw_model.named_parameters():
                 param.requires_grad = not trainable
                 if any(target in name for target in target_names):
                     param.requires_grad = trainable
                     print(name)
         # turn the replaced part to trainable
         elif target_part == "attn":
-            for name, param in model.named_parameters():
+            for name, param in raw_model.named_parameters():
                 param.requires_grad = not trainable
                 if any(target in name for target in target_names):
                     if (
@@ -336,14 +342,14 @@ def set_requires_grad(
                         print(name)
         # turn the FC layers in replaced block to trainable
         elif target_part == "FC":
-            for name, param in model.named_parameters():
+            for name, param in raw_model.named_parameters():
                 param.requires_grad = not trainable
                 if any(target in name for target in target_names):
                     if "mlp" in name:
                         param.requires_grad = trainable
                         print(name)
         elif target_part == "FC+head":
-            for name, param in model.named_parameters():
+            for name, param in raw_model.named_parameters():
                 param.requires_grad = not trainable
                 if any(target in name for target in target_names):
                     if "mlp" in name:

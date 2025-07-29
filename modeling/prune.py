@@ -1,9 +1,7 @@
 import re
 import json
 import copy
-import utils
 import torch
-import config
 import numpy as np
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
@@ -11,6 +9,8 @@ import torch.backends.cudnn as cudnn
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 
+from modeling import utils
+from modeling import config
 from modeling import architectures
 from modeling.data import load_dataset
 from modeling.train import train_model, evaluate_model, compute_lstm_reg_multihead
@@ -21,54 +21,18 @@ def prune(args, model, data_loader_val):
     print("--- Pruning ---")
     actual_model = model.module if hasattr(model, "module") else model
     masks = {}
-    threshold = args.sensitivity
     if args.rep_by == "multi-lstm":
         for blk_idx, block in enumerate(actual_model.blocks):
-            weight_groups = compute_lstm_reg_multihead(block, args, "mask")
-            vector_masks = {
-                name: (values > threshold).float()
-                for name, values in weight_groups.items()
-            }
-            # num_layers = block.attn.lstm.num_layers
-            for name, param in block.named_parameters():
-
-                if not (
-                    "attn.lstm.weight_ih" in name
-                    or "attn.lstm.weight_hh" in name
-                    or "attn.proj.weight" in name
-                ):
-                    continue
-
-                if "attn.proj.weight" not in name:
-                    ih_name = re.sub(r"hh", "ih", name)
-                    ih_name = re.sub(r"attn.lstm.", "", ih_name)
-                    row_mask = vector_masks[ih_name]
-
-                if "hh" in name:
-                    col_mask = row_mask
-                elif "ih" in name:
-                    input_dim = block.attn.input_dim
-                    col_mask = torch.ones(input_dim, device=row_mask.device)
-                elif "proj" in name:
-                    fwd_col_mask = vector_masks["weight_ih_l0"]
-                    rev_col_mask = vector_masks["weight_ih_l0_reverse"]
-                    col_mask = torch.cat([fwd_col_mask, rev_col_mask])
-                    row_mask = torch.ones(
-                        param.shape[0], device=col_mask.device, dtype=col_mask.dtype
-                    )
-
-                mat_mask = torch.outer(row_mask, col_mask)
-                full_mask = mat_mask if "proj" in name else mat_mask.repeat(4, 1)
-                full_name = f"blocks.{blk_idx}.{name}"
-                masks[full_name] = full_mask
-                param.data *= full_mask.to(param.device)
+            block_masks = compute_lstm_reg_multihead(block, args, mode="mask")
+            block_masks = {f"blocks.{blk_idx}.{k}": v for k, v in block_masks.items()}
+            masks.update(block_masks)
 
     else:
         for name, p in model.named_parameters():
             if "weight" in name:
                 tensor = p.data.cpu().numpy()
-                new_mask = np.where(abs(tensor) < threshold, 0, tensor)
-                mask = np.where(abs(tensor) < threshold, 0.0, 1.0)
+                new_mask = np.where(abs(tensor) < args.sensitivity, 0, tensor)
+                mask = np.where(abs(tensor) < args.sensitivity, 0.0, 1.0)
                 masks[name] = torch.from_numpy(mask).float().to(args.device)
                 p.data = torch.from_numpy(new_mask).to(args.device)
 

@@ -5,3 +5,4 @@ deploy/scripts/model.py
 deploy/scripts/rustwork_onnx.py
 deploy/scripts/shape_inference.py
 modeling/config.py
+deploy/preprocess/slice_model.py

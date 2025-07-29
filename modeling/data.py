@@ -3,13 +3,14 @@
 import os
 import json
 import torch
-import utils
 import scipy.io
 import numpy as np
 import pandas as pd
 
+from modeling import utils
+from modeling.samplers import RASampler
+
 from PIL import Image
-from samplers import RASampler
 from timm.data import create_transform
 from torch.utils.data import Subset, Dataset
 from torchvision import datasets, transforms
@@ -156,9 +157,9 @@ def build_dataset(is_train, args):
 
     elif args.dataset == "IMNET":
         if is_train:
-            root = os.path.join(args.data_path, "ILSVRC2012_img_train")
+            root = os.path.join(args.data_path, "train")
         else:
-            root = "/home/u17/yuxinr/datasets/ILSVRC2012_img_val"
+            root = os.path.join(args.data_path, "val")
         dataset = datasets.ImageFolder(root, transform=transform)
         nb_classes = 1000
         if is_train and args.train_subset < 1.0:

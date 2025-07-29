@@ -29,7 +29,7 @@ def _get_args_parser():
 
 def _fill_default_args(args):
     default_pth_path = Path("")
-    default_onnx_path = Path(args.base_dir) / "hw_files" / "models" / "model.onnx"
+    default_onnx_path = Path(args.base_dir) / "hw_files" / "models" / "model_stat.onnx"
     if args.pth_path == "":
         args.pth_path = default_pth_path
         print(f"Using default input .pth path {args.pth_path}")
@@ -75,7 +75,7 @@ if __name__ == "__main__":
         do_constant_folding=True,
         input_names=["input"],
         output_names=["output"],
-        dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+        # dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
         # verbose=True
     )
     print(f"\n ONNX model saved to: {args.onnx_path}")

@@ -3,13 +3,13 @@ import math
 import time
 import json
 import torch
-import utils
 import datetime
 import numpy as np
 
 from typing import Iterable
 from timm.utils import accuracy
 
+from modeling import utils
 from modeling import architectures
 from modeling.loss import CosineSimilarityLoss
 
@@ -65,13 +65,9 @@ def compute_lstm_reg_multihead(block, args, mode="reg"):
     """
     Returns: torch.Tensor (mode="reg") or dict[str, torch.Tensor] (mode="mask")
     """
-    lstm = block.attn.lstm
-    proj = block.attn.proj
     # get params
-    try:
-        heads = block.attn.head_num
-    except Exception:
-        heads = 3  # tiny
+    lstm = block.attn.lstm
+    heads = block.attn.head_num
     in_dim_total = block.attn.input_dim
     hid_total = block.attn.hidden_dim
     hid_per_head = hid_total // heads
@@ -86,38 +82,30 @@ def compute_lstm_reg_multihead(block, args, mode="reg"):
         ih = getattr(lstm, f"weight_ih{suffix}", None)  # [4*Htot , In]
         hh = getattr(lstm, f"weight_hh{suffix}", None)  # [4*Htot , Htot]
 
-        proj_weight = proj.weight  # [Out , 2*Htot]
-        dir_offset = direction * hid_total  # 0 或 hid_total
-
         for h in range(heads):
-            in_start = h * in_per_head
-            in_end = (h + 1) * in_per_head
-            hid_start = h * hid_per_head
-            hid_end = (h + 1) * hid_per_head
+            ih_slices = []
+            hh_slices = []
+        
+            ih_in_start = h * in_per_head
+            ih_in_end = (h + 1) * in_per_head
+            hh_in_start = h * hid_per_head
+            hh_in_end = (h + 1) * hid_per_head
+            ih_col = slice(ih_in_start, ih_in_end)
+            hh_col = slice(hh_in_start, hh_in_end)
 
-            ih_slice = ih[
-                4 * hid_start : 4 * hid_end, in_start:in_end
-            ]  # [4*hid_h , in_h]
-            hh_slice = hh[
-                4 * hid_start : 4 * hid_end, hid_start:hid_end
-            ]  # [4*hid_h , hid_h]
-            proj_slice = proj_weight[
-                :, dir_offset + hid_start : dir_offset + hid_end
-            ]  # [Out , hid_h]
-
-            # Reshape and concat all related channel
-            ih_rows = (
-                ih_slice.view(4, hid_per_head, -1)
-                .transpose(0, 1)
-                .reshape(hid_per_head, -1)
-            )
-            hh_split = hh_slice.view(4, hid_per_head, hid_per_head)
-            hh_rows = hh_split.transpose(0, 1).reshape(hid_per_head, -1)  # [Hh , 4*Hh]
-            hh_cols = hh_split.permute(2, 0, 1).reshape(hid_per_head, -1)  # [Hh , 4*Hh]
-            proj_col = proj_slice.t()  # [Hh , Out]
-
-            weight_group = torch.cat([ih_rows, hh_rows, hh_cols, proj_col], dim=1)
-            # weight_group = torch.cat([ih_rows, hh_rows], dim=1)
+            for g in range(4): # gates
+                gate_start = g * hid_total + h * hid_per_head
+                gate_end = g * hid_total + (h + 1) * hid_per_head
+                row = slice(gate_start, gate_end)
+                ih_slice = ih[row, ih_col]
+                hh_slice = hh[row, hh_col]
+                ih_slices.append(ih_slice)
+                hh_slices.append(hh_slice)
+            
+            ih_head = torch.cat(ih_slices, dim=1)
+            hh_head = torch.cat(hh_slices, dim=0).transpose(0, 1)
+            hh_head_transpose = torch.cat(hh_slices, dim=1)
+            weight_group = torch.cat([ih_head, hh_head, hh_head_transpose], dim=1)
 
             # Calculate reg
             if args.reg == 1:
@@ -136,17 +124,38 @@ def compute_lstm_reg_multihead(block, args, mode="reg"):
             if mode == "reg":
                 block_reg += reg
             elif mode == "mask":
-                key = f"weight_ih{suffix}"
+                key = "forward" if direction == 0 else "backward"
                 if key not in weight_groups:
                     weight_groups[key] = torch.zeros(
                         hid_total, device=weight_group.device
                     )
-                weight_groups[key][hid_start:hid_end] = torch.sum(weight_group, dim=1)
+                weight_groups[key][hh_in_start:hh_in_end] = torch.sum(weight_group, dim=1)
 
     if mode == "reg":
         return block_reg
     elif mode == "mask":
-        return weight_groups
+        mask_vectors = {
+            name: (values > args.sensitivity).float()
+            for name, values in weight_groups.items()
+        }
+        masks = {}
+        for name, param in block.named_parameters():
+            if not (
+                "attn.lstm.weight_ih" in name
+                or "attn.lstm.weight_hh" in name
+            ):
+                continue
+            dir = "backward" if "_reverse" in name else "forward"
+            row_mask = mask_vectors[dir]
+            if "hh" in name:
+                col_mask = row_mask
+            elif "ih" in name:
+                col_mask = torch.ones(in_dim_total, device=row_mask.device)
+
+            mask = torch.outer(row_mask, col_mask).repeat(4, 1)
+            masks[name] = mask
+            param.data *= mask.to(param.device)
+        return masks
 
 
 def reg_accuracy(output, target, topk=(1,)):
@@ -274,6 +283,7 @@ def train_one_epoch(
         with autocast_ctx:
             if loss_mode == "similarity":
                 criterion = CosineSimilarityLoss()
+                # criterion = torch.nn.MSELoss()
                 output_student = model(samples)
                 _ = teacher_model(samples)
                 sim_loss = 0.0
@@ -294,6 +304,7 @@ def train_one_epoch(
             elif loss_mode == "combine":
                 ce_criterion = torch.nn.CrossEntropyLoss()
                 cos_criterion = CosineSimilarityLoss()
+                # cos_criterion = torch.nn.MSELoss()
                 output_student = model(samples)
                 _ = teacher_model(samples)
                 sim_loss = 0.0

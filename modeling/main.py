@@ -2,7 +2,6 @@ import gc
 import copy
 import json
 import torch
-import utils
 import numpy as np
 import torch.backends.cudnn as cudnn
 
@@ -11,6 +10,7 @@ from timm.models import create_model
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 
+from modeling import utils
 from modeling import config
 from modeling.prune import prune
 from modeling import architectures
@@ -217,7 +217,7 @@ def train(args, seq=0):
             trained_model_without_ddp = trained_model_without_ddp.module
         if args.distributed:
             trained_model = torch.nn.parallel.DistributedDataParallel(
-                trained_model_without_ddp, device_ids=[args.gpu]
+                trained_model_without_ddp, device_ids=[args.gpu], find_unused_parameters=True
             )
 
         # Prune model if args.reg_in_train
