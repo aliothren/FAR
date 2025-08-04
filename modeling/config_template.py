@@ -457,7 +457,7 @@ def get_modeling_parser():
         help="Criterion using in training",
     )
 
-    # Training parameters
+    # Augment parameters
     parser.add_argument(
         "--drop",
         type=float,
@@ -512,6 +512,41 @@ def get_modeling_parser():
         help="Clip gradient norm (default: None, no clipping)",
     )
 
+    parser.add_argument(
+        "--model-ema", 
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use Exponential Moving Average to update model",
+    )
+    parser.add_argument("--model-ema-decay", type=float, default=0.99996, help='')
+    parser.add_argument(
+        "--model-ema-force-cpu",
+        action=argparse.BooleanOptionalAction,
+        default=False, 
+        help=''
+    )
+    parser.add_argument(
+        '--smoothing', 
+        type=float, 
+        default=0.1, 
+        help='Label smoothing (default: 0.1)'
+    )
+    # * Mixup params
+    parser.add_argument('--mixup', type=float, default=0.8,
+                        help='mixup alpha, mixup enabled if > 0. (default: 0.8)')
+    parser.add_argument('--mixup-active', type=bool, default=False, help='')
+    parser.add_argument('--cutmix', type=float, default=1.0,
+                        help='cutmix alpha, cutmix enabled if > 0. (default: 1.0)')
+    parser.add_argument('--cutmix-minmax', type=float, nargs='+', default=None,
+                        help='cutmix min/max ratio, overrides alpha and enables cutmix if set (default: None)')
+    parser.add_argument('--mixup-prob', type=float, default=1.0,
+                        help='Probability of performing mixup or cutmix when either/both is enabled')
+    parser.add_argument('--mixup-switch-prob', type=float, default=0.5,
+                        help='Probability of switching to cutmix when both mixup and cutmix enabled')
+    parser.add_argument('--mixup-mode', type=str, default='batch',
+                        help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
+
+    # Training parameters
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--epochs", default=200, type=int, help="Training epochs")
     parser.add_argument(
@@ -528,11 +563,45 @@ def get_modeling_parser():
         help="Not scale lr according to batch size",
     )
     parser.add_argument(
+        "--min-lr", 
+        type=float, 
+        default=1e-6, 
+        metavar='LR',
+        help='lower lr bound for cyclic schedulers that hit 0 (1e-5)')
+    parser.add_argument(
         "--warmup-epochs", type=int, default=5, help="Number of warmup epochs"
     )
     parser.add_argument(
         "--warmup-lr", type=float, default=1e-5, help="Warm-up initial learning rate"
     )
+    parser.add_argument(
+        "--decay-epochs", 
+        type=float, 
+        default=30, 
+        metavar='N',
+        help='epoch interval to decay LR'
+        )
+    parser.add_argument(
+        '--cooldown-epochs', 
+        type=int, 
+        default=10, 
+        metavar='N',
+        help='epochs to cooldown LR at min_lr, after cyclic schedule ends')
+    parser.add_argument(
+        '--patience-epochs', 
+        type=int, 
+        default=10, 
+        metavar='N',
+        help='patience epochs for Plateau LR scheduler (default: 10'
+        )
+    parser.add_argument(
+        '--decay-rate', 
+        '--dr', 
+        type=float, 
+        default=0.1, 
+        metavar='RATE',
+        help='LR decay rate (default: 0.1)'
+        )
     parser.add_argument(
         "--sched",
         default="cosine",
@@ -543,8 +612,8 @@ def get_modeling_parser():
 
     parser.add_argument(
         "--block-ft-mode",
-        default="block",
-        choices=["block", "FC", "FC+head"],
+        default="full",
+        choices=["block", "FC", "FC+head", "full"],
         type=str,
         help="Finetune scope in blockwise training",
     )

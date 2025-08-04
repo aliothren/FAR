@@ -6,6 +6,8 @@ import numpy as np
 import torch.backends.cudnn as cudnn
 
 from torchinfo import summary
+from timm.data import Mixup
+from timm.utils import ModelEma
 from timm.models import create_model
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
@@ -60,6 +62,13 @@ def train(args, seq=0):
 
     data_loader_train = load_dataset(args, "train")
     data_loader_val, _ = load_dataset(args, "val")
+    mixup_fn = None
+    args.mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    if args.mixup_active:
+        mixup_fn = Mixup(
+            mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
+            prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
+            label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
     # Load base models
     if args.ds_in_train:
@@ -146,6 +155,15 @@ def train(args, seq=0):
             )
     # DDP wrap
     student_model.to(args.device)
+    student_model_ema = None
+    if args.model_ema:
+        # Important to create EMA model after cuda(),
+        # DP wrapper, and AMP but before SyncBN and DDP wrapper
+        student_model_ema = ModelEma(
+            student_model,
+            decay=args.model_ema_decay,
+            device="cpu" if args.model_ema_force_cpu else '',
+            resume='')
     student_model_without_ddp = student_model
     if args.distributed:
         student_model = torch.nn.parallel.DistributedDataParallel(
@@ -189,8 +207,10 @@ def train(args, seq=0):
             loss_mode=args.train_loss,
             model=student_model,
             teacher_model=teacher_model,
+            model_ema=student_model_ema,
             train_data=data_loader_train,
             test_data=data_loader_val,
+            mixup_fn=mixup_fn,
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
             n_parameters=n_parameters,
@@ -215,9 +235,20 @@ def train(args, seq=0):
         trained_model_without_ddp = trained_model
         if hasattr(trained_model_without_ddp, "module"):
             trained_model_without_ddp = trained_model_without_ddp.module
+        trained_model_ema = None
+        if args.model_ema:
+            # Important to create EMA model after cuda(),
+            # DP wrapper, and AMP but before SyncBN and DDP wrapper
+            trained_model_ema = ModelEma(
+                trained_model_without_ddp,
+                decay=args.model_ema_decay,
+                device="cpu" if args.model_ema_force_cpu else '',
+                resume='')
         if args.distributed:
             trained_model = torch.nn.parallel.DistributedDataParallel(
-                trained_model_without_ddp, device_ids=[args.gpu], find_unused_parameters=True
+                trained_model_without_ddp,
+                device_ids=[args.gpu],
+                # find_unused_parameters=True,
             )
 
         # Prune model if args.reg_in_train
@@ -268,8 +299,10 @@ def train(args, seq=0):
             loss_mode=args.block_ft_train_loss,
             model=trained_model,
             teacher_model=teacher_model,
+            model_ema=trained_model_ema,
             train_data=data_loader_train,
             test_data=data_loader_val,
+            mixup_fn=mixup_fn,
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
             n_parameters=n_parameters,
@@ -305,6 +338,13 @@ def downstream(args, pretrained_path):
 
     data_loader_train = load_dataset(args, "train")
     data_loader_val, _ = load_dataset(args, "val")
+    mixup_fn = None
+    args.mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    if args.mixup_active:
+        mixup_fn = Mixup(
+            mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
+            prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
+            label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
     args.train_loss = "classification"
     print(
@@ -327,6 +367,15 @@ def downstream(args, pretrained_path):
         pruning_mask = {}
 
     model_without_ddp = model
+    model_ema = None
+    if args.model_ema:
+        # Important to create EMA model after cuda(),
+        # DP wrapper, and AMP but before SyncBN and DDP wrapper
+        model_ema = ModelEma(
+            model_without_ddp,
+            decay=args.model_ema_decay,
+            device="cpu" if args.model_ema_force_cpu else '',
+            resume='')
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.gpu], find_unused_parameters=True
@@ -339,14 +388,16 @@ def downstream(args, pretrained_path):
     # Set training configurations
     optimizer = create_optimizer(args, model_without_ddp)
     lr_scheduler, _ = create_scheduler(args, optimizer)
-    fted_model, fted_model_dict = train_model(
+    downstream_model, downstream_model_dict = train_model(
         args=args,
         stage="global",
         loss_mode=args.train_loss,
         model=model,
         teacher_model=None,
+        model_ema=model_ema,
         train_data=data_loader_train,
         test_data=data_loader_val,
+        mixup_fn=mixup_fn,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         n_parameters=n_parameters,
@@ -355,10 +406,10 @@ def downstream(args, pretrained_path):
 
     if utils.get_rank() == 0:
         save_path = args.output_dir / "model_ds.pth"
-        if hasattr(fted_model, "module"):
-            torch.save(fted_model.module, save_path)
+        if hasattr(downstream_model, "module"):
+            torch.save(downstream_model.module, save_path)
         else:
-            torch.save(fted_model, save_path)
+            torch.save(downstream_model, save_path)
 
 
 if __name__ == "__main__":

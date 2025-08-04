@@ -6,8 +6,10 @@ import torch
 import datetime
 import numpy as np
 
-from typing import Iterable
-from timm.utils import accuracy
+from timm.data import Mixup
+from typing import Iterable, Optional
+from timm.utils import accuracy, ModelEma, get_state_dict
+from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 
 from modeling import utils
 from modeling import architectures
@@ -85,7 +87,7 @@ def compute_lstm_reg_multihead(block, args, mode="reg"):
         for h in range(heads):
             ih_slices = []
             hh_slices = []
-        
+
             ih_in_start = h * in_per_head
             ih_in_end = (h + 1) * in_per_head
             hh_in_start = h * hid_per_head
@@ -93,7 +95,7 @@ def compute_lstm_reg_multihead(block, args, mode="reg"):
             ih_col = slice(ih_in_start, ih_in_end)
             hh_col = slice(hh_in_start, hh_in_end)
 
-            for g in range(4): # gates
+            for g in range(4):  # gates
                 gate_start = g * hid_total + h * hid_per_head
                 gate_end = g * hid_total + (h + 1) * hid_per_head
                 row = slice(gate_start, gate_end)
@@ -101,7 +103,7 @@ def compute_lstm_reg_multihead(block, args, mode="reg"):
                 hh_slice = hh[row, hh_col]
                 ih_slices.append(ih_slice)
                 hh_slices.append(hh_slice)
-            
+
             ih_head = torch.cat(ih_slices, dim=1)
             hh_head = torch.cat(hh_slices, dim=0).transpose(0, 1)
             hh_head_transpose = torch.cat(hh_slices, dim=1)
@@ -129,7 +131,9 @@ def compute_lstm_reg_multihead(block, args, mode="reg"):
                     weight_groups[key] = torch.zeros(
                         hid_total, device=weight_group.device
                     )
-                weight_groups[key][hh_in_start:hh_in_end] = torch.sum(weight_group, dim=1)
+                weight_groups[key][hh_in_start:hh_in_end] = torch.sum(
+                    weight_group, dim=1
+                )
 
     if mode == "reg":
         return block_reg
@@ -140,10 +144,7 @@ def compute_lstm_reg_multihead(block, args, mode="reg"):
         }
         masks = {}
         for name, param in block.named_parameters():
-            if not (
-                "attn.lstm.weight_ih" in name
-                or "attn.lstm.weight_hh" in name
-            ):
+            if not ("attn.lstm.weight_ih" in name or "attn.lstm.weight_hh" in name):
                 continue
             dir = "backward" if "_reverse" in name else "forward"
             row_mask = mask_vectors[dir]
@@ -160,19 +161,23 @@ def compute_lstm_reg_multihead(block, args, mode="reg"):
 
 def reg_accuracy(output, target, topk=(1,)):
     """Computes the precision@k for the specified values of k"""
-    with torch.no_grad():
-        maxk = max(topk)
-        batch_size = target.size(0)
+    if target.dim() == 2:               # soft label
+        target_cls = target.argmax(dim=1)
+    else:
+        target_cls = target.long()
 
-        _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
+    maxk = max(topk)
+    pred = output.topk(maxk, dim=1, largest=True, sorted=True)[1]
+    pred = pred.t()
 
-        res = []
-        for k in topk:
-            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
+    correct = pred.eq(target_cls.view(1, -1).expand_as(pred))  
+
+    res = []
+    batch_size = output.size(0)
+    for k in topk:
+        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+        res.append(correct_k.mul_(100.0 / batch_size))
+    return res
 
 
 @torch.no_grad()
@@ -246,6 +251,8 @@ def train_one_epoch(
     loss_mode,
     model: torch.nn.Module,
     teacher_model: torch.nn.Module,
+    cls_criterion,
+    sim_criterion,
     replace: list,
     data_loader: Iterable,
     optimizer: torch.optim.Optimizer,
@@ -256,6 +263,8 @@ def train_one_epoch(
     loss_scaler,
     max_norm: float = 0,
     add_reg=False,
+    model_ema: Optional[ModelEma] = None,
+    mixup_fn: Optional[Mixup] = None,
 ):
 
     model.train()
@@ -278,12 +287,12 @@ def train_one_epoch(
     ):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
+        if mixup_fn is not None:
+            samples, targets = mixup_fn(samples, targets)
 
         # Calculate training loss
         with autocast_ctx:
             if loss_mode == "similarity":
-                criterion = CosineSimilarityLoss()
-                # criterion = torch.nn.MSELoss()
                 output_student = model(samples)
                 _ = teacher_model(samples)
                 sim_loss = 0.0
@@ -293,28 +302,24 @@ def train_one_epoch(
                     # output_block_t = actual_teacher.blocks[blk].block_output
                     output_block_s = actual_model.blocks[blk].attn_output
                     output_block_t = actual_teacher.blocks[blk].attn_output
-                    sim_loss += criterion(output_block_s, output_block_t)
+                    sim_loss += sim_criterion(output_block_s, output_block_t)
 
             elif loss_mode == "classification":
-                criterion = torch.nn.CrossEntropyLoss()
                 output_student = model(samples)
                 sim_loss = 0.0
-                cls_loss = criterion(output_student, targets)
+                cls_loss = cls_criterion(output_student, targets)
 
             elif loss_mode == "combine":
-                ce_criterion = torch.nn.CrossEntropyLoss()
-                cos_criterion = CosineSimilarityLoss()
-                # cos_criterion = torch.nn.MSELoss()
                 output_student = model(samples)
                 _ = teacher_model(samples)
                 sim_loss = 0.0
-                cls_loss = ce_criterion(output_student, targets)
+                cls_loss = cls_criterion(output_student, targets)
                 for blk in replace:
                     # output_block_s = actual_model.blocks[blk].block_output
                     # output_block_t = actual_teacher.blocks[blk].block_output
                     output_block_s = actual_model.blocks[blk].attn_output
                     output_block_t = actual_teacher.blocks[blk].attn_output
-                    sim_loss += cos_criterion(output_block_s, output_block_t)
+                    sim_loss += sim_criterion(output_block_s, output_block_t)
 
         # Calculate reg loss
         reg = 0.0
@@ -353,6 +358,8 @@ def train_one_epoch(
         )
 
         torch.cuda.synchronize()
+        if model_ema is not None:
+            model_ema.update(model)
 
         # Update logs
         metric_logger.update(total_loss=total_loss_value)
@@ -434,14 +441,25 @@ def train_model(
     loss_mode,
     model,
     teacher_model,
+    model_ema,
     train_data,
     test_data,
+    mixup_fn,
     optimizer,
     lr_scheduler,
     n_parameters,
     mask={},
 ):
-
+    sim_criterion = CosineSimilarityLoss()
+    cls_criterion = LabelSmoothingCrossEntropy()
+    if args.mixup_active:
+        # smoothing is handled with mixup label transform
+        cls_criterion = SoftTargetCrossEntropy()
+    elif args.smoothing:
+        cls_criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
+    else:
+        cls_criterion = torch.nn.CrossEntropyLoss()
+        
     actual_model = model.module if hasattr(model, "module") else model
     if teacher_model is not None:
         teacher_model.eval()
@@ -450,7 +468,8 @@ def train_model(
         with (args.output_dir / "log.txt").open("a") as f:
             f.write("Args: " + str(args) + "\n")
         print(
-            f"Start {stage} training for {args.epochs} epochs, regularization status: {args.reg_in_train}"
+            f"Start {stage} training for {args.epochs} epochs, \
+              regularization status: {args.reg_in_train}"
         )
 
     checkpoint_path = args.output_dir / f"{stage}_checkpoint.pth"
@@ -509,6 +528,8 @@ def train_model(
             loss_mode=loss_mode,
             model=model,
             teacher_model=teacher_model,
+            cls_criterion=cls_criterion,
+            sim_criterion=sim_criterion,
             replace=args.replace,
             data_loader=train_data,
             optimizer=optimizer,
@@ -519,6 +540,8 @@ def train_model(
             loss_scaler=loss_scaler,
             max_norm=args.clip_grad,
             add_reg=add_reg,
+            model_ema=model_ema,
+            mixup_fn=mixup_fn,
         )
 
         with torch.no_grad():
@@ -559,6 +582,7 @@ def train_model(
             "optimizer": optimizer.state_dict(),
             "lr_scheduler": lr_scheduler.state_dict(),
             "epoch": epoch,
+            'model_ema': get_state_dict(model_ema),
             "scaler": loss_scaler.state_dict(),
             "args": args,
         }

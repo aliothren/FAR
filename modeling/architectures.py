@@ -21,10 +21,7 @@ class MultiHeadLstm(nn.Module):
             self.hidden_dim // self.head_num,
             self.head_num,
         )
-        mask_head = get_head_mask(
-            self.hidden_dim // self.head_num, 
-            self.head_num
-        )
+        mask_head = get_head_mask(self.hidden_dim // self.head_num, self.head_num)
 
         self.pre_proj = nn.Linear(self.input_dim, self.input_dim)
         self.lstm = nn.LSTM(

@@ -1,4 +1,3 @@
-import re
 import json
 import copy
 import torch
@@ -6,6 +5,8 @@ import numpy as np
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 
+from timm.data import Mixup
+from timm.utils import ModelEma
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 
@@ -93,7 +94,9 @@ def analyze_pruned_heads(model, head_num=3):
 def main(args):
 
     print(
-        f"Running in Pruning mode, pruning on FAR model pretrained from {args.far_model}, replaced by {args.rep_by}"
+        f"Running in Pruning mode,\
+          pruning on FAR model pretrained from {args.far_model},\
+          replaced by {args.rep_by}"
     )
     print(f"Using device: {args.device}")
 
@@ -107,11 +110,27 @@ def main(args):
 
     data_loader_train = load_dataset(args, "train")
     data_loader_val, _ = load_dataset(args, "val")
+    mixup_fn = None
+    args.mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    if args.mixup_active:
+        mixup_fn = Mixup(
+            mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
+            prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
+            label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
     # Load model
     print(f"Loading model: {args.far_weight}")
     model = torch.load(args.far_weight)
     model.to(args.device)
+    model_ema = None
+    if args.model_ema:
+        # Important to create EMA model after cuda(),
+        # DP wrapper, and AMP but before SyncBN and DDP wrapper
+        model_ema = ModelEma(
+            model,
+            decay=args.model_ema_decay,
+            device="cpu" if args.model_ema_force_cpu else '',
+            resume='')
     architectures.set_requires_grad(model, "prune")  # whole model trainable
 
     model_without_ddp = model
@@ -131,8 +150,10 @@ def main(args):
         loss_mode="classification",
         model=model,
         teacher_model=None,
+        model_ema=model_ema,
         train_data=data_loader_train,
         test_data=data_loader_val,
+        mixup_fn=mixup_fn,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         n_parameters=n_parameters,
@@ -152,12 +173,21 @@ def main(args):
     pruned_model, pruning_mask = prune(args, reg_model_without_ddp, data_loader_val)
     try:
         model_cpu = copy.deepcopy(pruned_model).cpu()
-        analyze_pruned_heads(model_cpu, 12)
+        analyze_pruned_heads(model_cpu, model_cpu.blocks[0].attn.head_num)
     except Exception as e:
         print(f"Unable to print pruned heads: {e}")
 
     # finetuning pruned model
     pruned_model_without_ddp = pruned_model
+    pruned_model_ema = None
+    if args.model_ema:
+        # Important to create EMA model after cuda(),
+        # DP wrapper, and AMP but before SyncBN and DDP wrapper
+        pruned_model_ema = ModelEma(
+            model,
+            decay=args.model_ema_decay,
+            device="cpu" if args.model_ema_force_cpu else '',
+            resume='')
     if hasattr(pruned_model_without_ddp, "module"):
         pruned_model_without_ddp = pruned_model_without_ddp.module
     if args.distributed:
@@ -165,10 +195,10 @@ def main(args):
             pruned_model, device_ids=[args.gpu]
         )
 
+    print("---- Post-pruning finetuning ----")
     brgs = copy.deepcopy(args)
     brgs.lr = args.ft_lr
     brgs.epochs = args.ft_epochs
-    brgs.opt = args.ft_opt
     brgs.batch_size = args.ft_batch_size
 
     optimizer = create_optimizer(brgs, pruned_model_without_ddp)
@@ -176,12 +206,14 @@ def main(args):
 
     fted_model, ft_model_dict = train_model(
         args=brgs,
-        stage="reg-ft",
+        stage="reg_ft",
         loss_mode="classification",
         model=pruned_model,
         teacher_model=None,
+        model_ema=pruned_model_ema,
         train_data=data_loader_train,
         test_data=data_loader_val,
+        mixup_fn=mixup_fn,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         n_parameters=n_parameters,
