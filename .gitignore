@@ -7,3 +7,5 @@ deploy/scripts/rustwork_onnx.py
 deploy/scripts/shape_inference.py
 deploy/preprocess/slice_model.py
 hw_files/models/model_quantized_all_*.onnx
+hw_files/models/*.npz
+hw_files/models/*.onnx

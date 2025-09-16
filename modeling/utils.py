@@ -497,3 +497,47 @@ def print_nonzeros(model):
     print(
         f"alive: {nz_channel}, pruned : {total - nz_channel}, total: {total}, Compression rate : {total/nz_channel:10.2f}x  ({100 * (total-nz_channel) / total:6.2f}% pruned)"
     )
+
+
+def get_distribution_target(mode='gaussian', length=12, max=1, standardized=True, target_depth=8, buffer=0.02):
+    """
+    This generates the target distributional prior
+    """
+    # this gets the distributional target to regularize the ACT halting scores towards
+    if mode == 'gaussian':
+        from scipy.stats import norm
+        # now get a serios of length
+        data = np.arange(length)
+        data = norm.pdf(data, loc=target_depth, scale=1)
+
+        if standardized:
+            print('\nReshaping distribution to be top-1 sum 1 - error at {}'.format(buffer))
+            scaling_factor = (1.-buffer) / sum(data[:target_depth])
+            data *= scaling_factor
+
+        return data
+
+    elif mode == 'lognorm':
+        from scipy.stats import lognorm
+
+        data = np.arange(length)
+        data = lognorm.pdf(data, s=0.99)
+
+        if standardized:
+            print('\nReshaping distribution to be top-1 sum 1 - error at {}'.format(buffer))
+            scaling_factor = (1.-buffer) / sum(data[:target_depth])
+            data *= scaling_factor
+
+        print('\nForming distribution at:', data)
+        return data
+
+    elif mode == 'skewnorm':
+        from scipy.stats import skewnorm
+        # now get a serios of length
+        data = np.arange(1,length)
+        data = skewnorm.pdf(data, a=-4, loc=target_depth)
+        return data
+
+    else:
+        print('Get distributional prior not implemented!')
+        raise NotImplementedError

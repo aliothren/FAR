@@ -451,6 +451,7 @@ def train_model(
     mask={},
 ):
     sim_criterion = CosineSimilarityLoss()
+    # sim_criterion = torch.nn.MSELoss()
     cls_criterion = LabelSmoothingCrossEntropy()
     if args.mixup_active:
         # smoothing is handled with mixup label transform

@@ -197,9 +197,9 @@ def main(args):
 
     print("---- Post-pruning finetuning ----")
     brgs = copy.deepcopy(args)
-    brgs.lr = args.ft_lr
-    brgs.epochs = args.ft_epochs
-    brgs.batch_size = args.ft_batch_size
+    brgs.lr = args.prune_ft_lr
+    brgs.epochs = args.prune_ft_epochs
+    brgs.batch_size = args.prune_ft_batch_size
 
     optimizer = create_optimizer(brgs, pruned_model_without_ddp)
     lr_scheduler, _ = create_scheduler(brgs, optimizer)
