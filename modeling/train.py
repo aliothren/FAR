@@ -190,11 +190,7 @@ def evaluate_model(
         if (teacher_model is not None and hasattr(teacher_model, "module"))
         else teacher_model
     )
-    autocast_ctx = (
-        torch.amp.autocast(device_type="cuda")
-        if device.type == "cuda"
-        else torch.cpu.amp.autocast(device_type="cpu")
-    )
+    autocast_ctx = torch.amp.autocast(device_type=device.type)
     if loss_type == "classification":
         criterion = torch.nn.CrossEntropyLoss()
     elif loss_type == "similarity":
@@ -204,9 +200,12 @@ def evaluate_model(
 
     # switch to evaluation mode
     model.eval()
+    if teacher_model is not None:
+        teacher_model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = "Test:"
 
+    # cnt_token, cnt_token_diff = None, None
     for images, target in metric_logger.log_every(data_loader, 100, header):
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
@@ -221,6 +220,28 @@ def evaluate_model(
             metric_logger.update(test_class_loss=loss.item())
             metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
             metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
+            # if cnt_token is None:
+            #     cnt_token = actual_model.counter_token.detach().cpu().numpy()
+            # else:
+            #     cnt_token = np.concatenate(
+            #         (cnt_token, actual_model.counter_token.detach().cpu().numpy())
+            #     )
+            # if cnt_token_diff is None:
+            #     cnt_token_diff = (
+            #         torch.max(actual_model.counter_token, dim=-1)[0]-
+            #         torch.min(actual_model.counter_token, dim=-1)[0]
+            #     ).detach().cpu().numpy()
+            # else:
+            #     cnt_token_diff = np.concatenate(
+            #         (
+            #             cnt_token_diff, 
+            #             (
+            #                 torch.max(actual_model.counter_token, dim=-1)[0]-
+            #                 torch.min(actual_model.counter_token, dim=-1)[0]
+            #             ).detach().cpu().numpy()
+            #         )
+            #     )
+
         elif loss_type == "similarity":
             with autocast_ctx:
                 output = actual_model.forward_features(images)
@@ -275,7 +296,7 @@ def train_one_epoch(
         if (teacher_model is not None and hasattr(teacher_model, "module"))
         else teacher_model
     )
-    autocast_ctx = torch.autocast(device_type=device.type)
+    autocast_ctx = torch.amp.autocast(device_type=device.type)
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
@@ -321,6 +342,36 @@ def train_one_epoch(
                     output_block_t = actual_teacher.blocks[blk].attn_output
                     sim_loss += sim_criterion(output_block_s, output_block_t)
 
+            if args.avit:
+                rho_token = torch.mean(actual_model.rho_token)
+                cnt_token = actual_model.counter_token.detach().cpu().numpy()
+                cnt_token_diff = (
+                    torch.max(actual_model.counter_token, dim=-1)[0]
+                    -torch.min(actual_model.counter_token, dim=-1)[0]
+                ).detach().cpu().numpy()
+
+        avit_loss = 0.0    
+        if args.avit:
+            actual_model.batch_cnt += 1
+            ponder_loss_token = rho_token * args.ponder_token_scale
+            avit_loss += ponder_loss_token
+
+            # Distributional prior
+            if args.distr_prior_alpha > 0.:
+                # KL loss
+                halting_score_distr = torch.stack(actual_model.halting_score_layer)
+                halting_score_distr = halting_score_distr / torch.sum(halting_score_distr)
+                halting_score_distr = torch.clamp(halting_score_distr, 0.01, 0.99)
+                halting_score_distr = halting_score_distr / torch.sum(halting_score_distr) # re-normalize
+                distr_prior_loss = args.distr_prior_alpha * actual_model.kl_loss(
+                    halting_score_distr.log(), 
+                    actual_model.distr_target
+                )
+
+                if distr_prior_loss.item() > 0.:
+                    avit_loss += distr_prior_loss
+
+
         # Calculate reg loss
         reg = 0.0
         cal_reg = False
@@ -328,7 +379,7 @@ def train_one_epoch(
             if args.rep_by == "multi-lstm" and args.decay:
                 for block in actual_model.blocks:
                     reg += compute_lstm_reg_multihead(block, args, mode="reg")
-        loss = sim_loss + cls_loss
+        loss = sim_loss + cls_loss + avit_loss
         if add_reg:
             total_loss = loss + args.decay * reg
         else:
@@ -341,6 +392,10 @@ def train_one_epoch(
 
         if not math.isfinite(total_loss_value):
             print("Loss is {}, stopping training".format(total_loss_value))
+            print(f"step: {step}, epoch: {epoch}, i: {i}")
+            print("cls_loss: {}, sim_loss: {}, avit_loss: {}".format(
+                cls_loss_value, sim_loss_value, avit_loss
+            )) 
             sys.exit(1)
 
         optimizer.zero_grad()
@@ -371,6 +426,15 @@ def train_one_epoch(
         metric_logger.update(prec1=prec1[0])
         metric_logger.update(prec5=prec5[0])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        if args.avit:
+            metric_logger.update(cnt_token_mean=float(np.mean(cnt_token)))
+            metric_logger.update(cnt_token_max=float(np.max(cnt_token)))
+            metric_logger.update(cnt_token_min=float(np.min(cnt_token)))
+            metric_logger.update(cnt_token_diff=float(np.mean(cnt_token_diff)))
+            metric_logger.update(ponder_loss_token=ponder_loss_token.item())
+            metric_logger.update(remaining_compute=float(np.mean(cnt_token) / len(actual_model.blocks)))
+            if args.distr_prior_alpha > 0.:
+                metric_logger.update(distri_prior_loss=distr_prior_loss.item())
 
         if i and i % args.print_freq == 0:
             nonzero = total = 0
@@ -546,26 +610,27 @@ def train_model(
         )
 
         with torch.no_grad():
-            blk_idx = args.replace[0]
-            num_zeros_wih = (
-                (actual_model.blocks[blk_idx].attn.lstm.weight_ih_l0 == 0).sum().item()
-            )
-            total_elements_wih = actual_model.blocks[
-                blk_idx
-            ].attn.lstm.weight_ih_l0.numel()
-            zero_ratio_wih = num_zeros_wih / total_elements_wih
-            num_zeros_proj = (
-                (actual_model.blocks[blk_idx].attn.head_proj.weight == 0).sum().item()
-            )
-            total_elements_proj = actual_model.blocks[
-                blk_idx
-            ].attn.head_proj.weight.numel()
-            zero_ratio_proj = num_zeros_proj / total_elements_proj
-            print(
-                f"[MASK CHECK]\n \
-                    weight_ih_l0 zero ratio: {zero_ratio_wih:.4f} ({num_zeros_wih}/{total_elements_wih})\n \
-                    head_proj zero ratio: {zero_ratio_proj:.4f} ({num_zeros_proj}/{total_elements_proj})  "
-            )
+            if args.rep_by == "multi-lstm":
+                blk_idx = args.replace[0]
+                num_zeros_wih = (
+                    (actual_model.blocks[blk_idx].attn.lstm.weight_ih_l0 == 0).sum().item()
+                )
+                total_elements_wih = actual_model.blocks[
+                    blk_idx
+                ].attn.lstm.weight_ih_l0.numel()
+                zero_ratio_wih = num_zeros_wih / total_elements_wih
+                num_zeros_proj = (
+                    (actual_model.blocks[blk_idx].attn.head_proj.weight == 0).sum().item()
+                )
+                total_elements_proj = actual_model.blocks[
+                    blk_idx
+                ].attn.head_proj.weight.numel()
+                zero_ratio_proj = num_zeros_proj / total_elements_proj
+                print(
+                    f"[MASK CHECK]\n \
+                        weight_ih_l0 zero ratio: {zero_ratio_wih:.4f} ({num_zeros_wih}/{total_elements_wih})\n \
+                        head_proj zero ratio: {zero_ratio_proj:.4f} ({num_zeros_proj}/{total_elements_proj})  "
+                )
 
         lr_scheduler.step(epoch)
 

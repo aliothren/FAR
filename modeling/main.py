@@ -12,6 +12,7 @@ from timm.models import create_model
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 
+import modeling.models_act
 from modeling import utils
 from modeling import config
 from modeling.prune import prune
@@ -64,6 +65,8 @@ def train(args, seq=0):
     data_loader_val, _ = load_dataset(args, "val")
     mixup_fn = None
     args.mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    if args.avit:
+        args.mixup_active = False
     if args.mixup_active:
         mixup_fn = Mixup(
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
@@ -115,6 +118,7 @@ def train(args, seq=0):
             drop_path_rate=args.drop_path,
             drop_block_rate=None,
             img_size=args.input_size,
+            args=args,  # For AViT
         )
         base_model = architectures.load_weight(base_model, args.base_weight)
         base_model.to(args.device)
@@ -135,7 +139,8 @@ def train(args, seq=0):
         # Load and modify student model
         if seq == 0:
             if args.skip_train_attn:
-                student_model = torch.load(args.attn_weight)
+                # student_model = torch.load(args.attn_weight)
+                student_model = base_model
             elif args.use_concat:
                 student_model = torch.load(args.concat_weight)
             else:

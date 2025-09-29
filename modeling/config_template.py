@@ -1,10 +1,3 @@
-"""
-This is a template for configuration file.
-Please don't modify this file.
-Use `cp config_template.py config.py` to get a personal copy,
-and fill in paths in the personalized file.
-"""
-
 import torch
 import fcntl
 import argparse
@@ -22,10 +15,10 @@ DATA_PATH = {
     "IMNET": "",
     "CIFAR100": "",
     "CIFAR10": "",
-    "FLOWER": "",
-    "CAR": "",
     "INAT18": "",
     "INAT19": "",
+    "FLOWER": "",
+    "CAR": "",
 }
 
 # Path to pretrained checkpoints of ATTENTION architecture models
@@ -42,6 +35,22 @@ BASE_MODEL_PATH = {
         "name": "deit_base_patch16_224",
         "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
     },
+    "DeiT-Base-384": {
+        "name": "deit_base_patch16_384",
+        "weight": "",
+    },
+    "AViT-Tiny": {
+        "name": "avit_tiny_patch16_224",
+        "weight": "",
+    },
+    "AViT-Small": {
+        "name": "avit_small_patch16_224",
+        "weight": "",
+    },
+    "AViT-Base": {
+        "name": "avit_base_patch16_224",
+        "weight": "",
+    },
 }
 
 # Path to downstreamed checkpoints of ATTENTION architecture models
@@ -49,10 +58,10 @@ BASE_MODEL_DS_PATH = {
     "DeiT-Tiny": {
         "CIFAR10": "",
         "CIFAR100": "",
-        "FLOWER": "",
-        "CAR": "",
         "INAT18": "",
         "INAT19": "",
+        "FLOWER": "",
+        "CAR": "",
     },
     "DeiT-Small": {
         "CIFAR10": "",
@@ -91,6 +100,10 @@ FAR_MODEL_ATTN_ONLY_PATH = {
     "DeiT-Tiny": "",
     "DeiT-Small": "",
     "DeiT-Base": "",
+    "DeiT-Base-384": "",
+    "AViT-Tiny": "",
+    "AViT-Small": "",
+    "AViT-Base": "",
 }
 
 # Path to concated FAR models with parallel trained blocks
@@ -99,6 +112,7 @@ FAR_MODEL_CONCAT_PATH = {
     "DeiT-Small": "",
     "DeiT-Base": "",
 }
+
 # Path to models to be visualized
 VIS_MODEL_PATH = {
     "DeiT-Tiny": {
@@ -195,7 +209,7 @@ def fill_default_args(args, full_arg=True):
     if args.mode == "train":
         if args.base_ds_weight == "" and args.ds_in_train:
             args.base_ds_weight = BASE_MODEL_DS_PATH[args.base_model][args.dataset]
-            print(f"Using default downstreamed base model weight {args.base_ds_model}")
+            print(f"Using default downstreamed base model weight {args.base_ds_weight}")
         if args.skip_train_attn and args.attn_weight == "":
             args.attn_weight = FAR_MODEL_ATTN_ONLY_PATH[args.base_model]
         if args.use_concat and args.concat_weight == "":
@@ -336,7 +350,15 @@ def get_modeling_parser():
     parser.add_argument(
         "--base-model",
         default="DeiT-Tiny",
-        choices=["DeiT-Tiny", "DeiT-Small", "DeiT-Base"],
+        choices=[
+            "DeiT-Tiny",
+            "DeiT-Small", 
+            "DeiT-Base", 
+            "DeiT-Base-384", 
+            "AViT-Tiny", 
+            "AViT-Small", 
+            "AViT-Base",
+        ],
         type=str,
         help="Name of ATTENTION based model. e.g.: DeiT-Tiny",
     )
@@ -416,7 +438,7 @@ def get_modeling_parser():
     parser.add_argument(
         "--rep-by",
         default="multi-lstm",
-        choices=["mixer", "lstm", "multi-lstm"],
+        choices=["mixer", "lstm", "multi-lstm", "avit", "mamba"],
         help="Structure used to replace attention",
     )
     parser.add_argument(
@@ -511,7 +533,6 @@ def get_modeling_parser():
         metavar="NORM",
         help="Clip gradient norm (default: None, no clipping)",
     )
-
     parser.add_argument(
         "--model-ema", 
         action=argparse.BooleanOptionalAction,
@@ -707,62 +728,28 @@ def get_modeling_parser():
         help="Downstream on pruned model",
     )
 
-    # Finetuning setups
-    parser.add_argument("--ft-mode", default="head", choices=["head", "sequential"])
-    parser.add_argument("--ft-model", default="", help="Path of model to be finetuned")
+    # Post pruning Finetuning setups
     parser.add_argument(
-        "--ft-loss",
-        default="classification",
-        choices=["similarity", "classification", "combine"],
-        type=str,
-        help="Criterion using in global finetune",
-    )
-    parser.add_argument(
-        "--ft-batch-size",
+        "--prune-ft-batch-size",
         default=256,
         type=int,
         help="Batch size when global finetuning",
     )
     parser.add_argument(
-        "--ft-epochs",
-        default=30,
+        "--prune-ft-epochs",
+        default=100,
         type=int,
         help="Training epochs when global finetuning",
     )
     parser.add_argument(
-        "--ft-lr",
+        "--prune-ft-lr",
         type=float,
         default=5e-6,
         metavar="LR",
         help="Learning rate when global finetuning",
     )
-    parser.add_argument(
-        "--ft-unscale-lr",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Not scale lr according to batch size when global finetuning",
-    )
-    parser.add_argument(
-        "--ft-warmup-epochs",
-        type=int,
-        default=5,
-        help="Number of warmup epochs when global finetuning",
-    )
-    parser.add_argument(
-        "--ft-warmup-lr",
-        type=float,
-        default=1e-5,
-        help="Warm-up initial learning rate when global finetuning",
-    )
-    parser.add_argument(
-        "--ft-sched",
-        default="cosine",
-        type=str,
-        metavar="SCHEDULER",
-        help='LR scheduler when global finetuning (default: "cosine")',
-    )
 
-    # distributed training parameters
+    # Distributed training parameters
     parser.add_argument(
         "--distributed",
         action=argparse.BooleanOptionalAction,
@@ -809,6 +796,46 @@ def get_modeling_parser():
     )
     parser.add_argument(
         "--sensitivity", type=float, default=1e-4, help="threshold used for pruning"
+    )
+
+    # AViT setups
+    parser.add_argument(
+        "--avit",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use AViT architecture",
+    )
+    parser.add_argument(
+        '--ponder_token_scale', 
+        default=0.0005, 
+        type=float, 
+        help="scaling for ponder cost, default 0.0005 as in paper, " \
+        "use 0.0 to disable ponder cost and only use distributional prior"
+        )
+    parser.add_argument(
+        '--act_mode', 
+        default=4, 
+        type=int,
+        help='4-token act, make sure this is always 4, ' \
+        'other modes are only used for initial method comparison and exploration'
+    )
+    parser.add_argument(
+        '--gate_scale', 
+        default=10., 
+        type=float, 
+        help="constant for token control gate rescale"
+    )
+    parser.add_argument(
+        '--gate_center', 
+        default= 30., 
+        type=float, 
+        help="constant for token control gate re-center, negatived when applied"
+    )
+    parser.add_argument(
+        '--distr_prior_alpha',
+        default=0.001,
+        type=float, 
+        help="scaling for kl of distributional prior"
     )
 
     return parser

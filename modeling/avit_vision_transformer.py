@@ -30,7 +30,7 @@ class Masked_Attention(Attention):
             self,
             dim: int,
             num_heads: int = 8,
-            qkv_bias: bool = False,
+            qkv_bias: bool = True,
             qk_norm: bool = False,
             proj_bias: bool = True,
             attn_drop: float = 0.,
@@ -60,13 +60,24 @@ class Masked_Attention(Attention):
 
         if self.fused_attn:
             if mask is not None:
-                attn_mask = mask.view(B, 1, 1, N).expand(B, self.num_heads, N, N)
-                attn_mask = attn_mask.to(torch.bool)
-                x = F.scaled_dot_product_attention(
-                    q, k, v,
-                    attn_mask=attn_mask,
+                add_mask = mask.view(B, 1, 1, N).expand(B, self.num_heads, N, N)  # [B,H,N,N]
+                add_mask = add_mask.float()
+                add_mask = add_mask.masked_fill(add_mask > 0, float('-inf')).masked_fill(add_mask == 0, 0.0)  # 0 / -inf
+
+                xf = F.scaled_dot_product_attention(
+                    q.float(), k.float(), v.float(),
+                    attn_mask=add_mask,  # additive mask, same dtype as q/k/v (这里用 fp32)
                     dropout_p=self.attn_drop.p if self.training else 0.,
                 )
+                x = xf.to(q.dtype)  # 回到原精度
+
+                # attn_mask = mask.view(B, 1, 1, N).expand(B, self.num_heads, N, N)
+                # attn_mask = attn_mask.to(torch.bool)
+                # x = F.scaled_dot_product_attention(
+                #     q, k, v,
+                #     attn_mask=attn_mask,
+                #     dropout_p=self.attn_drop.p if self.training else 0.,
+                # )
             else:
                 x = F.scaled_dot_product_attention(
                     q, k, v,
@@ -93,7 +104,7 @@ class Block_ACT(Block):
             dim: int,
             num_heads: int,
             mlp_ratio: float = 4.,
-            qkv_bias: bool = False,
+            qkv_bias: bool = True,
             qk_norm: bool = False,
             proj_bias: bool = True,
             proj_drop: float = 0.,
@@ -199,7 +210,10 @@ class ActVisionTransformer(VisionTransformer):
             num_heads=12, 
             drop_rate=0., 
             drop_path_rate: float = 0.,
-            args=None):
+            args=None,
+            qkv_bias=True,
+            **kwargs,
+        ):
         """
         Args:
             img_size (int, tuple): input image size
@@ -230,7 +244,7 @@ class ActVisionTransformer(VisionTransformer):
             num_heads=num_heads,
             drop_path_rate=drop_path_rate,
         )
-
+        self.args = args
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[
             Block_ACT(
@@ -239,6 +253,7 @@ class ActVisionTransformer(VisionTransformer):
                 proj_drop=drop_rate,
                 drop_path=dpr[i],
                 args=args, 
+                qkv_bias=qkv_bias,
                 index=i, 
             )
             for i in range(depth)])
@@ -339,8 +354,8 @@ class ActVisionTransformer(VisionTransformer):
             self.counter_token = self.counter_token + not_reached_token # These data points will need at least one more layer
 
             # Update the mask
-            mask_token = c_token < 1 - self.eps
-
+            mask_token = (c_token < 1 - self.eps).float()
+            mask_token[:, 0] = 1.0
             if output is None:
                 output = delta1 + delta2
             else:

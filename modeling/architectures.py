@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from timm.models import create_model
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 class MultiHeadLstm(nn.Module):
@@ -51,6 +52,101 @@ class MultiHeadLstm(nn.Module):
         out = self.post_proj(lstm_out)
         return out, self.lstm_out
 
+
+class MultiHeadLstmACT(nn.Module):
+    """
+    Multi-Head LSTM with A-ViT style Token-Act
+    """
+    def __init__(self, original_attn, num_layers: int = 1, dropout: float = 0.0):
+        super(MultiHeadLstmACT, self).__init__()
+        self.input_dim = original_attn.qkv.in_features
+        self.head_num = original_attn.num_heads
+        self.hidden_dim = original_attn.head_dim * self.head_num
+        self.output_dim = self.input_dim
+
+        mask_ih = get_block_mask(
+            self.input_dim // self.head_num,
+            self.hidden_dim // self.head_num,
+            self.head_num,
+        )
+        mask_hh = get_block_mask(
+            self.hidden_dim // self.head_num,
+            self.hidden_dim // self.head_num,
+            self.head_num,
+        )
+        mask_head = get_head_mask(self.hidden_dim // self.head_num, self.head_num)
+        
+        self.pre_proj = nn.Linear(self.input_dim, self.input_dim)
+        self.lstm = nn.LSTM(
+            input_size=self.input_dim,
+            hidden_size=self.hidden_dim,
+            bidirectional=True,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout,
+        )
+        self.head_proj = nn.Linear(2 * self.hidden_dim, self.hidden_dim)
+        self.post_proj = original_attn.proj
+
+        for name, param in self.named_parameters():
+            if "weight_ih" in name:
+                param.data *= mask_ih
+            elif "weight_hh" in name:
+                param.data *= mask_hh
+            elif "head_proj.weight" in name:
+                param.data *= mask_head
+
+    @torch.no_grad()
+    def _build_batch_indices(self, keep_mask: torch.Tensor):
+        B, N = keep_mask.shape
+        idx_list, lengths = [], []
+        for b in range(B):
+            keep_b = keep_mask[b] > 0.5
+            if not keep_b[0].item():
+                keep_b[0] = True
+            idx_b = torch.nonzero(keep_b, as_tuple=False).squeeze(-1)
+            idx_list.append(idx_b)
+            lengths.append(idx_b.numel())
+        lengths = torch.tensor(lengths, device=keep_mask.device, dtype=torch.long)
+        L_max = int(lengths.max().item())
+        return idx_list, lengths, L_max
+
+    def forward(self, x: torch.Tensor, keep_mask: torch.Tensor = None):
+        B, N, C = x.shape
+
+        x = self.pre_proj(x)  # [B, N, C]
+
+        if keep_mask is None:
+            keep_mask = x.new_ones(B, N)
+        else:
+            keep_mask = keep_mask.to(x.device, dtype=x.dtype)   
+
+        keep_mask = keep_mask.float()
+        keep_mask[:, 0] = 1.0
+        idx_list, lengths, L_max = self._build_batch_indices(keep_mask)
+        x_kept = x.new_zeros(B, L_max, C)
+        for b, idx_b in enumerate(idx_list):
+            Lb = idx_b.numel()
+            if Lb > 0:
+                x_kept[b, :Lb] = x[b, idx_b]
+
+        packed = pack_padded_sequence(x_kept, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_out, _ = self.lstm(packed)
+        out_padded, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=L_max)  # [B, L_max, 2C]
+
+        out_kept = self.head_proj(out_padded)  # [B, L_max, C]
+        full_feat = x.new_zeros(B, N, C)
+        for b, idx_b in enumerate(idx_list):
+            Lb = idx_b.numel()
+            if Lb > 0:
+                full_feat[b, idx_b] = out_kept[b, :Lb]
+
+        self.lstm_out = full_feat.clone() # [B, N, C]
+        out = self.post_proj(full_feat)
+        out = out * keep_mask.unsqueeze(-1)
+
+        return out, self.lstm_out
+    
 
 class ParallelLSTM(nn.Module):
     def __init__(
@@ -242,6 +338,8 @@ def replace_attention(args, model, repl_blocks, target=None):
     print(f"Replacing blocks: {repl_blocks}; Replace by: {target}")
 
     for idx, blk_index in enumerate(repl_blocks):
+        if target == "avit":
+            continue
         block = model.blocks[blk_index]
         if idx == 0:
             print(
@@ -319,6 +417,7 @@ def set_requires_grad(
         if target_part == "full":
             for name, param in raw_model.named_parameters():
                 param.requires_grad = trainable
+                print(name)
         elif target_part == "block":
             for name, param in raw_model.named_parameters():
                 param.requires_grad = not trainable
