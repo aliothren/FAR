@@ -139,8 +139,11 @@ def train(args, seq=0):
         # Load and modify student model
         if seq == 0:
             if args.skip_train_attn:
-                # student_model = torch.load(args.attn_weight)
-                student_model = base_model
+                # use for avit baseline training
+                if args.avit and args.rep_by == "avit":
+                    student_model = base_model
+                else:
+                    student_model = torch.load(args.attn_weight)
             elif args.use_concat:
                 student_model = torch.load(args.concat_weight)
             else:

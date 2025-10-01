@@ -14,7 +14,7 @@ from functools import partial
 from timm.models.vision_transformer import VisionTransformer, _cfg
 from timm.models.registry import register_model
 from timm.models.layers import trunc_normal_
-from modeling.avit_vision_transformer import ActVisionTransformer
+from modeling.architectures import ACT_VisionTransformer
 
 
 __all__ = [
@@ -25,9 +25,9 @@ __all__ = [
 
 
 @register_model
-def avit_tiny_patch16_224(pretrained=False, **kwargs):
+def avit_tiny_patch16_224(pretrained=True, **kwargs):
 
-    model = ActVisionTransformer(
+    model = ACT_VisionTransformer(
         patch_size=16, 
         embed_dim=192, 
         depth=12, 
@@ -46,9 +46,9 @@ def avit_tiny_patch16_224(pretrained=False, **kwargs):
 
 
 @register_model
-def avit_small_patch16_224(pretrained=False, **kwargs):
+def avit_small_patch16_224(pretrained=True, **kwargs):
 
-    model = ActVisionTransformer(
+    model = ACT_VisionTransformer(
         patch_size=16, 
         embed_dim=384, 
         depth=12, 
@@ -67,9 +67,9 @@ def avit_small_patch16_224(pretrained=False, **kwargs):
 
 
 @register_model
-def avit_base_patch16_224(pretrained=False, **kwargs):
+def avit_base_patch16_224(pretrained=True, **kwargs):
 
-    model = ActVisionTransformer(
+    model = ACT_VisionTransformer(
         patch_size=16, 
         embed_dim=768, 
         depth=12, 
