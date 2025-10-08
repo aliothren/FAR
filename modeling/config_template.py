@@ -838,6 +838,26 @@ def get_modeling_parser():
         help="scaling for kl of distributional prior"
     )
 
+    # loss weights
+    parser.add_argument(
+        '--sim-loss-weight', 
+        default=1.0, 
+        type=float, 
+        help="similarity loss weight during training, default 1.0"
+    )
+    parser.add_argument(
+        '--cls-loss-weight', 
+        default=1.0, 
+        type=float, 
+        help="classification loss weight during training, default 1.0"
+    )
+    parser.add_argument(
+        '--avit-loss-weight', 
+        default=0.1, 
+        type=float, 
+        help="halting loss weight during training, default 0.1"
+    )
+
     return parser
 
 

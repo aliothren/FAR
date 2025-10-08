@@ -286,10 +286,12 @@ def train_one_epoch(
     add_reg=False,
     model_ema: Optional[ModelEma] = None,
     mixup_fn: Optional[Mixup] = None,
+    use_avit_mask=False,
 ):
 
     model.train()
-
+    if teacher_model is not None:
+        teacher_model.eval()
     actual_model = model.module if hasattr(model, "module") else model
     actual_teacher = (
         teacher_model.module
@@ -313,9 +315,19 @@ def train_one_epoch(
 
         # Calculate training loss
         with autocast_ctx:
+            dtype = next(model.parameters()).dtype
             if loss_mode == "similarity":
-                output_student = model(samples)
-                _ = teacher_model(samples)
+                with torch.no_grad():
+                    _ = teacher_model(samples)
+                if args.avit and use_avit_mask:
+                    teacher_masks = [m.detach() for m in actual_teacher._last_masks]
+                    teacher_h_score = [h.detach().to(device=device, dtype=dtype)
+                        for h in actual_teacher._last_h_tokens]
+                    assert len(teacher_masks) == len(actual_model.blocks)
+                    output_student = model(samples, external_masks=teacher_masks)
+                    student_h_score = actual_model._self_h_tokens
+                else:
+                    output_student = model(samples)
                 sim_loss = 0.0
                 cls_loss = 0.0
                 for blk in replace:
@@ -331,8 +343,17 @@ def train_one_epoch(
                 cls_loss = cls_criterion(output_student, targets)
 
             elif loss_mode == "combine":
-                output_student = model(samples)
-                _ = teacher_model(samples)
+                with torch.no_grad():
+                    _ = teacher_model(samples)
+                if args.avit and use_avit_mask:
+                    teacher_masks = [m.detach() for m in actual_teacher._last_masks]
+                    teacher_h_score = [h.detach().to(device=device, dtype=dtype)
+                        for h in actual_teacher._last_h_tokens]
+                    assert len(teacher_masks) == len(actual_model.blocks)
+                    output_student = model(samples, external_masks=teacher_masks)
+                    student_h_score = actual_model._self_h_tokens
+                else:
+                    output_student = model(samples)
                 sim_loss = 0.0
                 cls_loss = cls_criterion(output_student, targets)
                 for blk in replace:
@@ -370,7 +391,15 @@ def train_one_epoch(
 
                 if distr_prior_loss.item() > 0.:
                     avit_loss += distr_prior_loss
-
+            
+            # distillation loss
+            if use_avit_mask:
+                # halting score loss
+                halting_loss = 0.0
+                h_loss_fn = torch.nn.MSELoss()
+                for h_s, h_t in zip(student_h_score, teacher_h_score):
+                    halting_loss += h_loss_fn(h_s, h_t)
+                avit_loss += halting_loss
 
         # Calculate reg loss
         reg = 0.0
@@ -379,7 +408,9 @@ def train_one_epoch(
             if args.rep_by == "multi-lstm" and args.decay:
                 for block in actual_model.blocks:
                     reg += compute_lstm_reg_multihead(block, args, mode="reg")
-        loss = sim_loss + cls_loss + avit_loss
+        loss = sim_loss * args.sim_loss_weight \
+            + cls_loss * args.cls_loss_weight \
+            + avit_loss * args.avit_loss_weight
         if add_reg:
             total_loss = loss + args.decay * reg
         else:
@@ -388,13 +419,14 @@ def train_one_epoch(
         loss_value = loss.item()
         cls_loss_value = cls_loss.item() if hasattr(cls_loss, "item") else cls_loss
         sim_loss_value = sim_loss.item() if hasattr(sim_loss, "item") else sim_loss
+        avit_loss_value = avit_loss.item() if hasattr(avit_loss, "item") else avit_loss
         total_loss_value = total_loss.item()
 
         if not math.isfinite(total_loss_value):
             print("Loss is {}, stopping training".format(total_loss_value))
             print(f"step: {step}, epoch: {epoch}, i: {i}")
             print("cls_loss: {}, sim_loss: {}, avit_loss: {}".format(
-                cls_loss_value, sim_loss_value, avit_loss
+                cls_loss_value, sim_loss_value, avit_loss_value
             )) 
             sys.exit(1)
 
@@ -421,6 +453,7 @@ def train_one_epoch(
         metric_logger.update(loss=loss_value)
         metric_logger.update(cls_loss=cls_loss_value)
         metric_logger.update(sim_loss=sim_loss_value)
+        metric_logger.update(avit_loss=avit_loss_value)
         metric_logger.update(reg=reg.item() if isinstance(reg, torch.Tensor) else reg)
         prec1, prec5 = reg_accuracy(output_student, targets, topk=(1, 5))
         metric_logger.update(prec1=prec1[0])
@@ -432,9 +465,11 @@ def train_one_epoch(
             metric_logger.update(cnt_token_min=float(np.min(cnt_token)))
             metric_logger.update(cnt_token_diff=float(np.mean(cnt_token_diff)))
             metric_logger.update(ponder_loss_token=ponder_loss_token.item())
-            metric_logger.update(remaining_compute=float(np.mean(cnt_token) / len(actual_model.blocks)))
             if args.distr_prior_alpha > 0.:
                 metric_logger.update(distri_prior_loss=distr_prior_loss.item())
+            if use_avit_mask:
+                metric_logger.update(halting_loss=halting_loss.item())
+            metric_logger.update(remaining_compute=float(np.mean(cnt_token) / len(actual_model.blocks)))
 
         if i and i % args.print_freq == 0:
             nonzero = total = 0
@@ -513,6 +548,7 @@ def train_model(
     lr_scheduler,
     n_parameters,
     mask={},
+    use_avit_mask=False,
 ):
     sim_criterion = CosineSimilarityLoss()
     # sim_criterion = torch.nn.MSELoss()
@@ -607,6 +643,7 @@ def train_model(
             add_reg=add_reg,
             model_ema=model_ema,
             mixup_fn=mixup_fn,
+            use_avit_mask=use_avit_mask,
         )
 
         with torch.no_grad():

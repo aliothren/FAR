@@ -198,6 +198,11 @@ def train(args, seq=0):
             p.numel() for p in student_model.parameters() if p.requires_grad
         )
         print(f"number of trainable params: {n_parameters}")
+        if args.avit and teacher_model is not None:
+            student_model.use_external_mask = True
+            use_avit_mask = True
+        else:
+            use_avit_mask = False
 
         # Set training configurations
         if not args.unscale_lr:
@@ -222,6 +227,7 @@ def train(args, seq=0):
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
             n_parameters=n_parameters,
+            use_avit_mask=use_avit_mask,
         )
 
     else:
@@ -243,6 +249,8 @@ def train(args, seq=0):
         trained_model_without_ddp = trained_model
         if hasattr(trained_model_without_ddp, "module"):
             trained_model_without_ddp = trained_model_without_ddp.module
+        if args.avit:
+            trained_model_without_ddp.use_external_mask = False
         trained_model_ema = None
         if args.model_ema:
             # Important to create EMA model after cuda(),

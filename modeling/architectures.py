@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+import collections
 
 from timm.layers import Mlp
 from timm.models import create_model
 from timm.models.vision_transformer import VisionTransformer, Block, Attention
 
-import inspect
 from typing import Optional, Type
 from mamba_ssm import Mamba2
 
@@ -346,47 +346,48 @@ class ACT_MultiHeadLstm(nn.Module):
     @torch.no_grad()
     def _build_batch_indices(self, keep_mask: torch.Tensor):
         B, N = keep_mask.shape
-        idx_list, lengths = [], []
-        for b in range(B):
-            keep_b = keep_mask[b] > 0.5
-            if not keep_b[0].item():
-                keep_b[0] = True
-            idx_b = torch.nonzero(keep_b, as_tuple=False).squeeze(-1)
-            idx_list.append(idx_b)
-            lengths.append(idx_b.numel())
-        lengths = torch.tensor(lengths, device=keep_mask.device, dtype=torch.long)
+        keep_mask = keep_mask.to(dtype=torch.int64)
+        if (keep_mask[:, 0] == 0).any():
+            keep_mask[:, 0] = 1
+
+        lengths = keep_mask.sum(dim=1).clamp_min(1) 
         L_max = int(lengths.max().item())
-        return idx_list, lengths, L_max
+
+        pos = torch.arange(N, device=keep_mask.device).unsqueeze(0).expand(B, -1) 
+        big = N * 2
+        order_key = pos + (1 - keep_mask) * big  
+        if hasattr(torch, 'stable'):
+            sorted_idx = order_key.argsort(dim=1, stable=True)
+        else:
+            sorted_idx = order_key.argsort(dim=1)
+        idx_pad = sorted_idx[:, :L_max]
+        return idx_pad, lengths, L_max
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
         B, N, C = x.shape
 
         x = self.pre_proj(x)  # [B, N, C]
-
         if mask is None:
-            mask = x.new_ones(B, N)
+            keep_mask = x.new_ones(B, N, dtype=torch.int64)
         else:
-            mask = (mask < 0.5).to(dtype=x.dtype)
+            keep_mask = (mask < 0.5).to(dtype=torch.int64)
 
-        mask = mask.float()
-        mask[:, 0] = 1.0
-        idx_list, lengths, L_max = self._build_batch_indices(mask)
-        x_kept = x.new_zeros(B, L_max, C)
-        for b, idx_b in enumerate(idx_list):
-            Lb = idx_b.numel()
-            if Lb > 0:
-                x_kept[b, :Lb] = x[b, idx_b]
+        idx_pad, lengths, L_max = self._build_batch_indices(keep_mask)    # idx_pad:[B,L_max]
 
-        packed = pack_padded_sequence(x_kept, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        idx_exp = idx_pad.unsqueeze(-1).expand(-1, -1, C)                 # [B, L_max, C]
+        x_kept = x.gather(dim=1, index=idx_exp)                           # [B, L_max, C]
+
+        packed = pack_padded_sequence(
+                    x_kept, 
+                    lengths.to('cpu'),
+                    batch_first=True, enforce_sorted=False
+                )
         packed_out, _ = self.lstm(packed)
-        out_padded, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=L_max)  # [B, L_max, 2C]
+        out_padded, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=L_max) 
 
-        out_kept = self.head_proj(out_padded)  # [B, L_max, C]
-        full_feat = x.new_zeros(B, N, C)
-        for b, idx_b in enumerate(idx_list):
-            Lb = idx_b.numel()
-            if Lb > 0:
-                full_feat[b, idx_b] = out_kept[b, :Lb]
+        out_kept = self.head_proj(out_padded)
+        full_feat = x.new_zeros(B, N, self.hidden_dim)
+        full_feat.scatter_(dim=1, index=idx_exp, src=out_kept)
 
         self.lstm_out = full_feat.clone() # [B, N, C]
         out = self.post_proj(full_feat)
@@ -597,6 +598,8 @@ class ACT_VisionTransformer(VisionTransformer):
 
         self._last_masks = []
         self._last_h_tokens = []
+        self._self_masks = []
+        self._self_h_tokens = []
         
         c_token = self.c_token.clone()
         R_token = self.R_token.clone()
@@ -658,6 +661,10 @@ class ACT_VisionTransformer(VisionTransformer):
                     * R_token.view(bs, self.total_token_cnt, 1) \
                     * reached_token.view(bs, self.total_token_cnt, 1)
             self.rho_token = self.rho_token + R_token * reached_token
+            self_mask = (c_token < 1 - self.eps).float()
+            self_mask[:, 0] = 1.0
+            self._self_masks.append(self_mask)
+            self._self_h_tokens.append(h_token)
 
             # Case 2: threshold not reached
             # token part
@@ -711,7 +718,21 @@ def load_weight(model, weight):
         )
     else:
         checkpoint = torch.load(weight, map_location="cpu")
-    checkpoint_model = checkpoint["model"]
+    if isinstance(checkpoint, nn.Module):
+        checkpoint_model = checkpoint.state_dict()
+    elif isinstance(checkpoint, (dict, collections.OrderedDict)):
+        if "model" in checkpoint:
+            m = checkpoint["model"]
+            if isinstance(m, nn.Module):
+                checkpoint_model = m.state_dict()
+            else:
+                checkpoint_model = m
+        elif "state_dict" in checkpoint:
+            checkpoint_model = checkpoint["state_dict"]
+        elif "model_state_dict" in checkpoint:
+            checkpoint_model = checkpoint["model_state_dict"]
+        else:
+            checkpoint_model = checkpoint
     state_dict = model.state_dict()
     for k in ["head.weight", "head.bias", "head_dist.weight", "head_dist.bias"]:
         if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
@@ -792,9 +813,11 @@ def replace_attention(args, model, repl_blocks, target=None):
         if args.avit:
             if target == "multi-lstm":
                 block.attn = ACT_MultiHeadLstm(block.attn)
+            elif target == "attn":
+                return model  # no need to replace
             else:
                 raise NotImplementedError(
-                    "Not available replace architecture (multi-lstm)"
+                    f"Not available replace architecture {target}"
                 )
             repl_block = block
         else:
