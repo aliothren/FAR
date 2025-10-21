@@ -14,11 +14,75 @@ from mamba_ssm import Mamba2
 from modeling.utils import get_distribution_target
 
 
+# Bidirectional Mamba module using Mamba-2 block, same architecture as BiLSTM
+class BiMamba(nn.Module):
+    """
+    Drop-in replacement for DeiT attention, using official Mamba-2 block.
+      - Use bidirectional Mamba (like BiLSTM), and post projection after mamba to keep same shape
+    """
+    def __init__(
+        self,
+        original_attn: nn.Module,
+        d_conv: int = 4,
+        d_state: int = 256,
+        expand: int = 1,
+        n_groups: bool = False,
+    ) -> None:
+        super().__init__()
+        self.input_dim = original_attn.qkv.in_features
+        self.head_num = original_attn.num_heads
+        self.head_dim = self.input_dim // self.head_num
+        self.hidden_dim = d_state if d_state is not None else self.head_dim
+        self.output_dim = self.input_dim
+        self.n_groups = 1 if not n_groups else self.head_num
+
+        self.mamba_fwd = Mamba2(
+            d_model=self.input_dim, 
+            d_state=self.hidden_dim, 
+            d_conv=d_conv, 
+            expand=expand,
+            headdim=self.head_dim,
+            d_ssm=self.input_dim,
+            ngroups=self.n_groups,
+            use_mem_eff_path=False,
+        )
+        self.mamba_fwd.out_proj = nn.Identity()
+        self.mamba_bwd = Mamba2(
+            d_model=self.input_dim, 
+            d_state=self.hidden_dim, 
+            d_conv=d_conv, 
+            expand=expand,
+            headdim=self.head_dim,
+            d_ssm=self.input_dim,
+            ngroups=self.n_groups,
+            use_mem_eff_path=False,
+        )
+        self.mamba_bwd.out_proj = nn.Identity()
+        self.head_proj = nn.Conv1d(
+                            in_channels=2 * self.input_dim, 
+                            out_channels=self.input_dim, 
+                            kernel_size=1, 
+                            groups=self.head_num, 
+                            bias=False,
+                        )
+        self.post_proj = original_attn.proj
+
+    def forward(self, x: torch.Tensor):
+        x_fwd, _ = self.mamba_fwd(x)  # [B, N, C]
+        x_bwd, _ = self.mamba_bwd(torch.flip(x, dims=[1]))  # [B, N, C]
+        x = torch.cat([x_fwd, torch.flip(x_bwd, dims=[1])], dim=-1)  # [B, N, 2C]
+        x = self.head_proj(x.transpose(1, 2)).transpose(1, 2)    
+        self.attn_out = x.clone()
+        out = self.post_proj(x)
+
+        return out, self.attn_out
+
+
 # Mamba-2 block with intermediate output
 class MambaWithOutput(nn.Module):
     """
-    Drop-in replacement for DeiT attention, using *official* Mamba-2 block.
-      - Implement **inter-layer flipping** (odd/even) without changing shapes
+    Drop-in replacement for DeiT attention, using official Mamba-2 block.
+      - Implement inter-layer flipping (odd/even) without changing shapes
     """
 
     def __init__(
@@ -26,8 +90,8 @@ class MambaWithOutput(nn.Module):
         original_attn: nn.Module,
         layer_id: int = 0,
         d_conv: int = 4,
-        d_state: int = None,
-        expand: int = 2,
+        d_state: int = 256,
+        expand: int = 1,
         n_groups: bool = False,
     ) -> None:
         super().__init__()
@@ -209,7 +273,8 @@ class BlockWithOutput(nn.Module):
         elif target == "multi-lstm":
             self.attn = MultiHeadLstm(original_block.attn)
         elif target == "mamba":
-            self.attn = MambaWithOutput(original_block.attn, layer_id=layer_id)
+            # self.attn = MambaWithOutput(original_block.attn, layer_id=layer_id)
+            self.attn = BiMamba(original_block.attn)
         else:
             raise NotImplementedError(
                 "Not available replace architecture (attn/multi-lstm)"

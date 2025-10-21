@@ -336,6 +336,7 @@ def train_one_epoch(
                     output_block_s = actual_model.blocks[blk].attn_output
                     output_block_t = actual_teacher.blocks[blk].attn_output
                     sim_loss += sim_criterion(output_block_s, output_block_t)
+                sim_loss += 0.0 * output_student.sum()
 
             elif loss_mode == "classification":
                 output_student = model(samples)
@@ -371,27 +372,12 @@ def train_one_epoch(
                     -torch.min(actual_model.counter_token, dim=-1)[0]
                 ).detach().cpu().numpy()
 
-        avit_loss = 0.0    
-        if args.avit:
+        avit_loss = 0.0  
+        if hasattr(actual_model, "batch_cnt"):
             actual_model.batch_cnt += 1
-            ponder_loss_token = rho_token * args.ponder_token_scale
-            avit_loss += ponder_loss_token
-
-            # Distributional prior
-            if args.distr_prior_alpha > 0.:
-                # KL loss
-                halting_score_distr = torch.stack(actual_model.halting_score_layer)
-                halting_score_distr = halting_score_distr / torch.sum(halting_score_distr)
-                halting_score_distr = torch.clamp(halting_score_distr, 0.01, 0.99)
-                halting_score_distr = halting_score_distr / torch.sum(halting_score_distr) # re-normalize
-                distr_prior_loss = args.distr_prior_alpha * actual_model.kl_loss(
-                    halting_score_distr.log(), 
-                    actual_model.distr_target
-                )
-
-                if distr_prior_loss.item() > 0.:
-                    avit_loss += distr_prior_loss
-            
+        if args.avit:
+            distr_prior_loss = 0.0
+            ponder_loss_token = rho_token * args.ponder_token_scale  
             # distillation loss
             if use_avit_mask:
                 # halting score loss
@@ -400,6 +386,24 @@ def train_one_epoch(
                 for h_s, h_t in zip(student_h_score, teacher_h_score):
                     halting_loss += h_loss_fn(h_s, h_t)
                 avit_loss += halting_loss
+            # ponder loss
+            else:
+                avit_loss += ponder_loss_token
+
+                # Distributional prior
+                if args.distr_prior_alpha > 0.:
+                    # KL loss
+                    halting_score_distr = torch.stack(actual_model.halting_score_layer)
+                    halting_score_distr = halting_score_distr / torch.sum(halting_score_distr)
+                    halting_score_distr = torch.clamp(halting_score_distr, 0.01, 0.99)
+                    halting_score_distr = halting_score_distr / torch.sum(halting_score_distr) # re-normalize
+                    distr_prior_loss = args.distr_prior_alpha * actual_model.kl_loss(
+                        halting_score_distr.log(), 
+                        actual_model.distr_target
+                    )
+
+                    if distr_prior_loss.item() > 0.:
+                        avit_loss += distr_prior_loss
 
         # Calculate reg loss
         reg = 0.0
@@ -464,11 +468,14 @@ def train_one_epoch(
             metric_logger.update(cnt_token_max=float(np.max(cnt_token)))
             metric_logger.update(cnt_token_min=float(np.min(cnt_token)))
             metric_logger.update(cnt_token_diff=float(np.mean(cnt_token_diff)))
-            metric_logger.update(ponder_loss_token=ponder_loss_token.item())
+            metric_logger.update(ponder_loss_token=ponder_loss_token.item()\
+                                     if isinstance(ponder_loss_token, torch.Tensor) else ponder_loss_token)
             if args.distr_prior_alpha > 0.:
-                metric_logger.update(distri_prior_loss=distr_prior_loss.item())
+                metric_logger.update(distri_prior_loss=distr_prior_loss.item()\
+                                     if isinstance(distr_prior_loss, torch.Tensor) else distr_prior_loss)
             if use_avit_mask:
-                metric_logger.update(halting_loss=halting_loss.item())
+                metric_logger.update(halting_loss=halting_loss.item()\
+                                     if isinstance(halting_loss, torch.Tensor) else halting_loss)
             metric_logger.update(remaining_compute=float(np.mean(cnt_token) / len(actual_model.blocks)))
 
         if i and i % args.print_freq == 0:
@@ -550,8 +557,9 @@ def train_model(
     mask={},
     use_avit_mask=False,
 ):
-    sim_criterion = CosineSimilarityLoss()
-    # sim_criterion = torch.nn.MSELoss()
+    # sim_criterion = CosineSimilarityLoss()
+    sim_criterion = torch.nn.MSELoss()
+    print(f"Using {sim_criterion} loss for similarity.")
     cls_criterion = LabelSmoothingCrossEntropy()
     if args.mixup_active:
         # smoothing is handled with mixup label transform

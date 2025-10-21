@@ -72,7 +72,8 @@ def train(args, seq=0):
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
-
+    print(f"Mixup active: {args.mixup_active}")
+    
     # Load base models
     if args.ds_in_train:
         print(f"Training on downstream task {args.dataset}")
@@ -110,6 +111,7 @@ def train(args, seq=0):
 
     else:
         print(f"Creating Base model: {args.base_model}")
+        model_args = args if args.avit else None  # For AViT
         base_model = create_model(
             model_name=args.base_model_name,
             pretrained=False,
@@ -118,7 +120,7 @@ def train(args, seq=0):
             drop_path_rate=args.drop_path,
             drop_block_rate=None,
             img_size=args.input_size,
-            args=args,  # For AViT
+            args=model_args,
         )
         base_model = architectures.load_weight(base_model, args.base_weight)
         base_model.to(args.device)
