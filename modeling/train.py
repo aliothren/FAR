@@ -180,6 +180,13 @@ def reg_accuracy(output, target, topk=(1,)):
     return res
 
 
+def bernoulli_kl(p_t, p_s, eps=1e-6):
+    p_t = p_t.clamp(eps, 1 - eps)
+    p_s = p_s.clamp(eps, 1 - eps)
+    return (p_t * (p_t.log() - p_s.log())
+          + (1 - p_t) * ((1 - p_t).log() - (1 - p_s).log())).mean()
+
+
 @torch.no_grad()
 def evaluate_model(
     data_loader, device, model, teacher_model=None, loss_type="classification"
@@ -384,8 +391,15 @@ def train_one_epoch(
                 halting_loss = 0.0
                 h_loss_fn = torch.nn.MSELoss()
                 for h_s, h_t in zip(student_h_score, teacher_h_score):
-                    halting_loss += h_loss_fn(h_s, h_t)
+                    # halting_loss += h_loss_fn(h_s, h_t)
+                    halting_loss += bernoulli_kl( h_t[:,1:], h_s[:,1:])
                 avit_loss += halting_loss
+
+                teacher_keep = [m[:, 1:].float().mean() for m in teacher_masks]
+                student_h = [h[:, 1:] for h in student_h_score]
+                student_keep = (1.0 - torch.stack(student_h, dim=0)).cumprod(dim=0).mean(dim=(1,2))
+                keep_loss = sum((sk - tk).pow(2) for sk, tk in zip(student_keep, teacher_keep))
+                avit_loss += 5*keep_loss
             # ponder loss
             else:
                 avit_loss += ponder_loss_token

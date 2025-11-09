@@ -43,7 +43,7 @@ def plot_heatmap(
         ax.plot(cls_data)
         ax.set_title(title + " (CLS Row)")
         ax.set_xlabel("Key Token Index")
-        ax.set_ylabel("Attention Weight")
+        ax.set_ylabel("Gradient Score")
         ax.set_xlim(0, len(cls_data) - 1)
         ax.set_ylim(0, 1)
         ax.grid(True)
@@ -59,7 +59,7 @@ def plot_heatmap(
         )
 
         fig, ax = plt.subplots()
-        im = ax.imshow(patch_data, cmap="viridis", vmin=0, vmax=0.5)
+        im = ax.imshow(patch_data, cmap="viridis", vmin=0, vmax=1.0)
         # im = ax.imshow(patch_data, cmap='viridis')
         ax.set_title(title)
         ax.set_xticks([])
@@ -78,10 +78,10 @@ def plot_attention_heatmap(attentions, head_ids, layer_ids, save_dir):
         for head_id in head_ids:
             data = attention[head_id].numpy()
             save_path = save_dir / f"layer{layer_id}_head{head_id}.png"
-            plot_heatmap(data, f"FAR: Layer {layer_id} Head {head_id}", save_path)
+            plot_heatmap(data, f"Ours: Layer {layer_id} Head {head_id}", save_path)
         avg_data = torch.mean(attention, dim=0).numpy()
         save_path = save_dir / f"layer{layer_id}_avg.png"
-        plot_heatmap(avg_data, f"Average Gradiant Map: Layer {layer_id}", save_path)
+        plot_heatmap(avg_data, f"Gradient Score Map: Layer {layer_id}", save_path)
 
 
 def plot_gradiant_heatmap(gradiants, layer_ids, save_dir, mode):
@@ -119,7 +119,9 @@ def get_gradients_multihead(model, imgs, head_num=3, mode="avg"):
 
         def new_forward(self, input, blk_idx=idx):
             # lstm_out: [B, T, 2*hidden_dim_total]  (=2*head_num*H)
-            lstm_out, _ = self.lstm(self.token_norm(self.pre_proj(input)))
+            lstm_out, _ = self.lstm(self.pre_proj(input))
+            lstm_out = self.head_proj(lstm_out)
+            self.lstm_out = lstm_out.clone()
             # H = self.hidden_dim // self.head_num
             H = self.hidden_dim // 3
             fw = lstm_out[:, :, : self.hidden_dim]  # [B, T, hidden_dim]
@@ -138,7 +140,7 @@ def get_gradients_multihead(model, imgs, head_num=3, mode="avg"):
                 elif mode == "avg":
                     outputs[blk_idx][head_idx] = torch.cat([fw_part, bw_part], dim=-1)
 
-            return self.proj(lstm_out)
+            return self.post_proj(lstm_out), lstm_out
 
         blk.attn.forward = new_forward.__get__(blk.attn, blk.attn.__class__)
 
@@ -237,7 +239,7 @@ if __name__ == "__main__":
     heads = [0, 1, 2]
     batch = 1
 
-    parser = config.get_args_parser()
+    parser = config.get_full_parser()
     args = parser.parse_args()
     args = config.fill_default_args(args)
 
