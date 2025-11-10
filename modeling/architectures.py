@@ -68,10 +68,16 @@ class BiMamba(nn.Module):
         self.post_proj = original_attn.proj
 
     def forward(self, x: torch.Tensor):
-        x_fwd, _ = self.mamba_fwd(x)  # [B, N, C]
+        B, N, C = x.shape
+        x_fwd, _ = self.mamba_fwd(x)
         x_bwd, _ = self.mamba_bwd(torch.flip(x, dims=[1]))  # [B, N, C]
-        x = torch.cat([x_fwd, torch.flip(x_bwd, dims=[1])], dim=-1)  # [B, N, 2C]
-        x = self.head_proj(x.transpose(1, 2)).transpose(1, 2)    
+        x_bwd = torch.flip(x_bwd, dims=[1])  
+        x_fwd_h = x_fwd.view(B, N, self.head_num, self.head_dim)
+        x_bwd_h = x_bwd.view(B, N, self.head_num, self.head_dim)
+        x_cat = torch.cat([x_fwd_h, x_bwd_h], dim=-1)           # [B, N, H, 2Dh]
+        x_cat = x_cat.view(B, N, self.head_num * 2 * self.head_dim)  # [B, N, 2C]
+        x_cat = x_cat.transpose(1, 2)     
+        x = self.head_proj(x_cat).transpose(1, 2)                                      
         self.attn_out = x.clone()
         out = self.post_proj(x)
 
@@ -407,6 +413,110 @@ class ACT_MultiHeadLstm(nn.Module):
                 param.data *= mask_hh
             elif "head_proj.weight" in name:
                 param.data *= mask_head
+
+    @torch.no_grad()
+    def _build_batch_indices(self, keep_mask: torch.Tensor):
+        B, N = keep_mask.shape
+        keep_mask = keep_mask.to(dtype=torch.int64)
+        if (keep_mask[:, 0] == 0).any():
+            keep_mask[:, 0] = 1
+
+        lengths = keep_mask.sum(dim=1).clamp_min(1) 
+        L_max = int(lengths.max().item())
+
+        pos = torch.arange(N, device=keep_mask.device).unsqueeze(0).expand(B, -1) 
+        big = N * 2
+        order_key = pos + (1 - keep_mask) * big  
+        if hasattr(torch, 'stable'):
+            sorted_idx = order_key.argsort(dim=1, stable=True)
+        else:
+            sorted_idx = order_key.argsort(dim=1)
+        idx_pad = sorted_idx[:, :L_max]
+        return idx_pad, lengths, L_max
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
+        B, N, C = x.shape
+
+        x = self.pre_proj(x)  # [B, N, C]
+        if mask is None:
+            keep_mask = x.new_ones(B, N, dtype=torch.int64)
+        else:
+            keep_mask = (mask < 0.5).to(dtype=torch.int64)
+
+        idx_pad, lengths, L_max = self._build_batch_indices(keep_mask)    # idx_pad:[B,L_max]
+
+        idx_exp = idx_pad.unsqueeze(-1).expand(-1, -1, C)                 # [B, L_max, C]
+        x_kept = x.gather(dim=1, index=idx_exp)                           # [B, L_max, C]
+
+        packed = pack_padded_sequence(
+                    x_kept, 
+                    lengths.to('cpu'),
+                    batch_first=True, enforce_sorted=False
+                )
+        packed_out, _ = self.lstm(packed)
+        out_padded, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=L_max) 
+
+        out_kept = self.head_proj(out_padded)
+        full_feat = x.new_zeros(B, N, self.hidden_dim)
+        full_feat.scatter_(dim=1, index=idx_exp, src=out_kept)
+
+        self.lstm_out = full_feat.clone() # [B, N, C]
+        out = self.post_proj(full_feat)
+
+        return out, self.lstm_out
+    
+
+# Adaptive Bidirectional Mamba for A-ViT
+class ACT_BiMamba(nn.Module):
+    """
+    Bidirectional Mamba module with A-ViT style Token-Act
+    """
+    def __init__(
+        self,
+        original_attn: nn.Module,
+        d_conv: int = 4,
+        d_state: int = 256,
+        expand: int = 1,
+        n_groups: bool = False,
+    ) -> None:
+        super(ACT_BiMamba, self).__init__()
+        self.input_dim = original_attn.qkv.in_features
+        self.head_num = original_attn.num_heads
+        self.head_dim = self.input_dim // self.head_num
+        self.hidden_dim = d_state if d_state is not None else self.head_dim
+        self.output_dim = self.input_dim
+        self.n_groups = 1 if not n_groups else self.head_num
+        
+        self.mamba_fwd = Mamba2(
+            d_model=self.input_dim, 
+            d_state=self.hidden_dim, 
+            d_conv=d_conv, 
+            expand=expand,
+            headdim=self.head_dim,
+            d_ssm=self.input_dim,
+            ngroups=self.n_groups,
+            use_mem_eff_path=False,
+        )
+        self.mamba_fwd.out_proj = nn.Identity()
+        self.mamba_bwd = Mamba2(
+            d_model=self.input_dim, 
+            d_state=self.hidden_dim, 
+            d_conv=d_conv, 
+            expand=expand,
+            headdim=self.head_dim,
+            d_ssm=self.input_dim,
+            ngroups=self.n_groups,
+            use_mem_eff_path=False,
+        )
+        self.mamba_bwd.out_proj = nn.Identity()
+        self.head_proj = nn.Conv1d(
+                            in_channels=2 * self.input_dim, 
+                            out_channels=self.input_dim, 
+                            kernel_size=1, 
+                            groups=self.head_num, 
+                            bias=False,
+                        )
+        self.post_proj = original_attn.proj
 
     @torch.no_grad()
     def _build_batch_indices(self, keep_mask: torch.Tensor):

@@ -1,14 +1,20 @@
 import os
+import cv2
 import torch
+import numpy as np
 import matplotlib.pyplot as plt
 
 from pathlib import Path
 from timm.models import create_model
+import torchvision.utils as vutils
+import matplotlib.pyplot as plt
+from PIL import Image
 
 from modeling import config
+from modeling import models_act
 from modeling import architectures
 from modeling.data import load_dataset
-
+from modeling.utils import MetricLogger
 
 def plot_heatmap(
     data: torch.Tensor, title: str, save_path=None, save_cls=True, save_patch=True
@@ -91,6 +97,99 @@ def plot_gradiant_heatmap(gradiants, layer_ids, save_dir, mode):
         data = gradiant.numpy()
         save_path = save_dir / f"layer{layer_id}_{mode}.png"
         plot_heatmap(data, f"Average Attention Map: Layer {layer_id}", save_path)
+
+
+def get_gradients_mamba(model, imgs, head_num=3, mode="avg"):
+    """
+    return grad_maps:  shape = [head_num, num_blocks, T, T]
+    """
+    model.train()
+
+    inputs = [None] * len(model.blocks)
+    outputs = [[None] * head_num for _ in model.blocks]
+    hooks, original_forwards = [], []
+
+    print("Registering hooks and fwds")
+    for idx, blk in enumerate(model.blocks):
+
+        def hook_fn(module, input, output, blk_idx=idx):
+            input = input[0]
+            input.retain_grad()
+            inputs[blk_idx] = input
+
+        hooks.append(blk.attn.mamba_fwd.register_forward_hook(hook_fn))
+
+        # ---- monkey-patch block.attn.forward ----
+        original_forward = blk.attn.forward
+        original_forwards.append(original_forward)
+
+        def new_forward(self, input, blk_idx=idx):
+            x_in = input                              # [B, T, C]
+
+            x_fwd, _ = self.mamba_fwd(x_in)          # [B, T, C]
+            x_bwd, _ = self.mamba_bwd(torch.flip(x_in, dims=[1]))  # [B, T, C]
+            x_cat = torch.cat(
+                [x_fwd, torch.flip(x_bwd, dims=[1])], dim=-1
+            )                                        # [B, T, 2C]
+
+            x_hp = self.head_proj(x_cat.transpose(1, 2)).transpose(1, 2)  # [B, T, C]
+            self.attn_out = x_hp.clone()
+            H = self.head_dim
+            for head_idx in range(head_num):
+                s = head_idx * H
+                e = (head_idx + 1) * H
+                head_feat = x_hp[:, :, s:e]          # [B, T, H]
+                outputs[blk_idx][head_idx] = head_feat
+
+            out = self.post_proj(x_hp)               # [B, T, C]
+            return out, self.attn_out
+
+        blk.attn.forward = new_forward.__get__(blk.attn, blk.attn.__class__)
+
+    print("Calculating gradiants")
+    gradiants = []
+    for b in range(imgs.shape[0]):  # batchsize
+        img = imgs[b].unsqueeze(0).detach().clone().requires_grad_(True)
+        inputs = [None] * len(model.blocks)
+        outputs = [[None] * head_num for _ in model.blocks]
+        with torch.enable_grad():
+            _ = model(img)
+
+        gradiant = [[] for _ in range(head_num)]
+        for blk_idx in range(len(model.blocks)):
+            blk_input = inputs[blk_idx]
+            blk_output = outputs[blk_idx]
+
+            for head_idx in range(head_num):
+                print(
+                    f"Calculating grad of img {b} for block {blk_idx}, head {head_idx}"
+                )
+                head_output = blk_output[head_idx]  # [1,T,*]
+                token_num = head_output.shape[1]
+                layer_grad = torch.zeros((token_num, token_num))
+
+                for token_idx in range(token_num):
+                    model.zero_grad()
+                    if blk_input.grad is not None:
+                        blk_input.grad.zero_()
+                    token = head_output[0, token_idx]
+                    token.sum().backward(retain_graph=True)
+                    token_grad = blk_input.grad.detach().abs().sum(dim=-1).squeeze(0)
+                    layer_grad[token_idx] = token_grad.cpu()
+
+                gradiant[head_idx].append(layer_grad)
+
+        gradiants.append(torch.stack([torch.stack(h) for h in gradiant]))
+    gradiants = torch.stack(gradiants, dim=0)
+    avg_gradiant = gradiants.mean(dim=0).permute(1, 0, 2, 3).contiguous()
+
+    for h in hooks:
+        h.remove()
+    for i, blk in enumerate(model.blocks):
+        blk.attn.forward = original_forwards[i]
+
+    model.eval()
+    return avg_gradiant
 
 
 def get_gradients_multihead(model, imgs, head_num=3, mode="avg"):
@@ -233,6 +332,106 @@ def get_attentions(model, imgs):
     return attn_scores
 
 
+def hconcat_resize_min(im_list, interpolation=cv2.INTER_CUBIC):
+    # snippet for merging and visualization
+    h_min = max(im.shape[0] for im in im_list)
+    im_list_resize = [cv2.resize(im, (int(im.shape[1] * h_min / im.shape[0]), h_min), interpolation=interpolation)
+                      for im in im_list]
+    return cv2.hconcat(im_list_resize)
+
+
+def merge_image(im1, im2):
+    # snippet for merging and visualization
+    h_margin = 54
+    v_margin = 80
+    im2 = im2[h_margin+5:480-h_margin, v_margin:640-v_margin]
+    return hconcat_resize_min([im1, im2])
+
+
+@torch.no_grad()
+def visualize_avit(data_loader, model, device, file_path):
+    # this snipet visualize the token depth distribution of an avit model
+    # more particular, it saves the image with the largset token depth std. per imagenet class
+    # in validation set.
+
+    criterion = torch.nn.CrossEntropyLoss()
+    metric_logger = MetricLogger(delimiter="  ")
+    header = 'Visualize:'
+
+    # switch to evaluation mode
+    model.eval()
+    model = model.module if hasattr(model, "module") else model
+    save_image = True
+
+    # amid imagenet class separation for best visualization, assert batch size is 10
+    # such that no validation images overlap in classes
+    # assert args.batch_size==50
+    class_set = set()
+
+    for images, target in metric_logger.log_every(data_loader, 100, header):
+        images = images.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
+
+        # compute output
+        with torch.cuda.amp.autocast():
+            output = model(images)
+            _ = criterion(output, target)
+
+        cnt_token = model.counter_token.data.cpu().numpy()
+
+        # this tries to save images
+        if save_image:
+
+            cnt_token_std_lst = np.std(cnt_token, axis=-1)
+            value = np.max(cnt_token_std_lst)
+            key = np.argmax(cnt_token_std_lst)
+
+            # this part fetches most sensitive samples per class
+            tmp_set = set(target.data.cpu().numpy())
+
+            if not all([x in class_set for x in tmp_set]):
+                print('Now visualizing token depth for class {}/1000.'.format(target[key].data.item()))
+                max_std = 0
+
+            class_set = class_set | tmp_set
+
+            if value >= max_std:
+
+                max_std=value
+                idx=key
+
+                if not os.path.exists(file_path):
+                    os.makedirs(file_path)
+
+                target_token = cnt_token[idx,1:]
+                array = np.reshape(target_token, (14, 14))
+
+                plt.imshow(array, cmap='hot', interpolation='nearest')
+                plt.axis('off')
+                cb=plt.colorbar(shrink=0.8)
+
+                # save token depth heat map
+                plt.savefig(file_path + '/class{}_token_depth.jpg'.format(target[idx].data.item()))
+                vutils.save_image(
+                    images[idx].data, 
+                    file_path + '/class{}_ref.jpg'.format(target[idx].data.item()),
+                    normalize=True, scale_each=True
+                    )
+                # save concatenated image
+                # note that this snippet is not fully optimized in speed
+                im1 = cv2.imread(file_path + '/class{}_ref.jpg'.format(target[idx].data.item()))
+                im2 = cv2.imread(file_path + '/class{}_token_depth.jpg'.format(target[idx].data.item()))
+
+                if im1 is not None and im2 is not None:
+                    cv2.imwrite(file_path + '/class{}_combined.jpg'.format(target[idx].data.item()), merge_image(im1, im2))
+
+                cb.remove()
+
+    print('Visualization done.')
+
+    return
+
+
 if __name__ == "__main__":
     # Modify visualization scope here
     layers = list(range(12))
@@ -269,16 +468,24 @@ if __name__ == "__main__":
 
     output_dir = Path(args.base_dir) / "figs"
     os.makedirs(output_dir, exist_ok=True)
-    save_path = output_dir / f"{args.vis_model}"
+    save_path = output_dir / f"{args.vis_model}_{args.vis_mode}"
 
-    # Get attention scores
-    if "DeiT" in args.vis_model:
-        save_path = save_path / "uni"
-        attentions = get_attentions(model, imgs)
-        # Save heatmap
-        plot_attention_heatmap(attentions, heads, layers, save_path)
-    elif "Multihead" in args.vis_model:
-        mode = "avg"
-        save_path = save_path / "uni"
-        gradiants = get_gradients_multihead(model, imgs, mode=mode)
-        plot_attention_heatmap(gradiants, heads, layers, save_path)
+    if args.vis_mode == "token":
+        # Get attention scores
+        if "DeiT" in args.vis_model:
+            save_path = save_path / "uni"
+            attentions = get_attentions(model, imgs)
+            # Save heatmap
+            plot_attention_heatmap(attentions, heads, layers, save_path)
+        elif "Multihead" in args.vis_model:
+            mode = "avg"
+            save_path = save_path / "uni"
+            gradiants = get_gradients_multihead(model, imgs, mode=mode)
+            plot_attention_heatmap(gradiants, heads, layers, save_path)
+        elif "Mamba" in args.vis_model:
+            mode = "avg"
+            save_path = save_path / "uni"
+            gradiants = get_gradients_mamba(model, imgs, mode=mode)
+            plot_attention_heatmap(gradiants, heads, layers, save_path)
+    elif args.vis_mode == "avit":
+        visualize_avit(data_loader_val, model, args.device, str(save_path))
