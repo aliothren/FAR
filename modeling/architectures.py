@@ -14,6 +14,15 @@ from mamba_ssm import Mamba2
 from modeling.utils import get_distribution_target
 
 
+def len_aware_flip(x, lengths):
+    B, L, C = x.shape
+    y = x.new_zeros(B, L, C)
+    for i, li in enumerate(lengths.tolist()):
+        if li > 0:
+            y[i, :li] = torch.flip(x[i, :li], dims=[0])
+    return y
+
+
 # Bidirectional Mamba module using Mamba-2 block, same architecture as BiLSTM
 class BiMamba(nn.Module):
     """
@@ -24,7 +33,7 @@ class BiMamba(nn.Module):
         self,
         original_attn: nn.Module,
         d_conv: int = 4,
-        d_state: int = 256,
+        d_state: int = 128,
         expand: int = 1,
         n_groups: bool = False,
     ) -> None:
@@ -80,51 +89,6 @@ class BiMamba(nn.Module):
         x = self.head_proj(x_cat).transpose(1, 2)                                      
         self.attn_out = x.clone()
         out = self.post_proj(x)
-
-        return out, self.attn_out
-
-
-# Mamba-2 block with intermediate output
-class MambaWithOutput(nn.Module):
-    """
-    Drop-in replacement for DeiT attention, using official Mamba-2 block.
-      - Implement inter-layer flipping (odd/even) without changing shapes
-    """
-
-    def __init__(
-        self,
-        original_attn: nn.Module,
-        layer_id: int = 0,
-        d_conv: int = 4,
-        d_state: int = 256,
-        expand: int = 1,
-        n_groups: bool = False,
-    ) -> None:
-        super().__init__()
-        self.input_dim = original_attn.qkv.in_features
-        self.head_num = original_attn.num_heads
-        self.head_dim = self.input_dim // self.head_num
-        self.hidden_dim = d_state if d_state is not None else self.head_dim
-        self.output_dim = self.input_dim
-        self.layer_id = layer_id
-        self.n_groups = 1 if not n_groups else self.head_num
-
-        self.mamba = Mamba2(
-            d_model=self.input_dim, 
-            d_state=self.hidden_dim, 
-            d_conv=d_conv, 
-            expand=expand,
-            headdim=self.head_dim,
-            d_ssm=self.input_dim,
-            ngroups=self.n_groups,
-            use_mem_eff_path=False,
-        )
-
-    def forward(self, x: torch.Tensor):
-        # Inter-layer flipping
-        if self.layer_id % 2 == 1:
-            x = torch.flip(x, dims=[1])
-        out, self.attn_out = self.mamba(x)  # [B, N, C]
 
         return out, self.attn_out
 
@@ -279,7 +243,6 @@ class BlockWithOutput(nn.Module):
         elif target == "multi-lstm":
             self.attn = MultiHeadLstm(original_block.attn)
         elif target == "mamba":
-            # self.attn = MambaWithOutput(original_block.attn, layer_id=layer_id)
             self.attn = BiMamba(original_block.attn)
         else:
             raise NotImplementedError(
@@ -344,10 +307,10 @@ class ACT_Attention(Attention):
 
                 xf = F.scaled_dot_product_attention(
                     q.float(), k.float(), v.float(),
-                    attn_mask=add_mask,  # additive mask, same dtype as q/k/v (这里用 fp32)
+                    attn_mask=add_mask,
                     dropout_p=self.attn_drop.p if self.training else 0.,
                 )
-                x = xf.to(q.dtype)  # 回到原精度
+                x = xf.to(q.dtype)
 
             else:
                 x = F.scaled_dot_product_attention(
@@ -475,7 +438,7 @@ class ACT_BiMamba(nn.Module):
         self,
         original_attn: nn.Module,
         d_conv: int = 4,
-        d_state: int = 256,
+        d_state: int = 128,
         expand: int = 1,
         n_groups: bool = False,
     ) -> None:
@@ -537,37 +500,53 @@ class ACT_BiMamba(nn.Module):
             sorted_idx = order_key.argsort(dim=1)
         idx_pad = sorted_idx[:, :L_max]
         return idx_pad, lengths, L_max
-
+    
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
         B, N, C = x.shape
-
-        x = self.pre_proj(x)  # [B, N, C]
+        assert C == self.input_dim
         if mask is None:
-            keep_mask = x.new_ones(B, N, dtype=torch.int64)
+            keep_mask = torch.ones(B, N, dtype=torch.int64, device=x.device)
         else:
-            keep_mask = (mask < 0.5).to(dtype=torch.int64)
+            if mask.dim() == 3: mask = mask.squeeze(-1)
+            keep_mask = (mask < 0.5).to(torch.int64)
 
-        idx_pad, lengths, L_max = self._build_batch_indices(keep_mask)    # idx_pad:[B,L_max]
+        idx_pad, lengths, L_max = self._build_batch_indices(keep_mask)     # [B, L_max]
+        idx_exp = idx_pad.unsqueeze(-1).expand(-1, -1, C)                  # [B, L_max, C]
+        x_kept = x.gather(1, idx_exp).contiguous()                         # [B, L_max, C]
 
-        idx_exp = idx_pad.unsqueeze(-1).expand(-1, -1, C)                 # [B, L_max, C]
-        x_kept = x.gather(dim=1, index=idx_exp)                           # [B, L_max, C]
+        ar = torch.arange(L_max, device=x.device).unsqueeze(0)             # [1, L_max]
+        seq_mask_bool = ar < lengths.unsqueeze(1)                          # [B, L_max]
+        seq_mask = seq_mask_bool.unsqueeze(-1).to(dtype=x_kept.dtype)      # [B, L_max, 1]
 
-        packed = pack_padded_sequence(
-                    x_kept, 
-                    lengths.to('cpu'),
-                    batch_first=True, enforce_sorted=False
-                )
-        packed_out, _ = self.lstm(packed)
-        out_padded, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=L_max) 
+        x_kept = x_kept * seq_mask
 
-        out_kept = self.head_proj(out_padded)
-        full_feat = x.new_zeros(B, N, self.hidden_dim)
-        full_feat.scatter_(dim=1, index=idx_exp, src=out_kept)
+        x_fwd, _ = self.mamba_fwd(x_kept)                                  # [B, L_max, C]
 
-        self.lstm_out = full_feat.clone() # [B, N, C]
+        off = (L_max - lengths).unsqueeze(1)                                # [B,1]
+        roll_idx = (ar + off) % L_max                                       # [B, L_max]
+        roll_idx_exp = roll_idx.unsqueeze(-1).expand(-1, -1, C)             # [B, L_max, C]
+
+        x_bwd_in = x_kept.flip(1).gather(1, roll_idx_exp)                   # [B, L_max, C]
+        x_bwd, _ = self.mamba_bwd(x_bwd_in)                                 # [B, L_max, C]
+
+        inv_roll_idx = (ar - off) % L_max
+        inv_roll_idx_exp = inv_roll_idx.unsqueeze(-1).expand(-1, -1, C)
+        x_bwd = x_bwd.gather(1, inv_roll_idx_exp).flip(1)                   # 还原到正向顺序
+
+        x_fwd = x_fwd * seq_mask
+        x_bwd = x_bwd * seq_mask
+        x_fwd_h = x_fwd.view(B, L_max, self.head_num, self.head_dim)
+        x_bwd_h = x_bwd.view(B, L_max, self.head_num, self.head_dim)
+        x_cat = torch.cat([x_fwd_h, x_bwd_h], dim=-1).view(B, L_max, 2 * C)   # [B, L, 2C]
+        x_cat = self.head_proj(x_cat.transpose(1, 2).contiguous()).transpose(1, 2)
+
+        idx_exp = idx_exp.to(device=x_cat.device, dtype=torch.long)
+        full_feat = x_cat.new_zeros(B, N, C)
+        full_feat.scatter_(1, idx_exp, x_cat)
+
+        self.attn_out = full_feat
         out = self.post_proj(full_feat)
-
-        return out, self.lstm_out
+        return out, self.attn_out
     
 
 # Adaptive Block for A-ViT
@@ -990,6 +969,8 @@ def replace_attention(args, model, repl_blocks, target=None):
                 block.attn = ACT_MultiHeadLstm(block.attn)
             elif target == "attn":
                 return model  # no need to replace
+            elif target == "mamba":
+                block.attn = ACT_BiMamba(block.attn)
             else:
                 raise NotImplementedError(
                     f"Not available replace architecture {target}"

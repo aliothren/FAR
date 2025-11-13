@@ -5,16 +5,33 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from pathlib import Path
+from collections import defaultdict
 from timm.models import create_model
 import torchvision.utils as vutils
+from torchvision import datasets, transforms
+from torch.utils.data import Dataset
 import matplotlib.pyplot as plt
-from PIL import Image
 
 from modeling import config
 from modeling import models_act
 from modeling import architectures
 from modeling.data import load_dataset
-from modeling.utils import MetricLogger
+
+FIXED_IMG_PAIRS_PATH = "/home/yuxinr/far/FAR/figs/fixed_pairs.npy"
+
+
+class IndexedDataset(Dataset):
+    def __init__(self, base_dataset):
+        self.base = base_dataset
+        self.samples = base_dataset.samples
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, index):
+        img, target = self.base[index]
+        return img, target, index
+    
 
 def plot_heatmap(
     data: torch.Tensor, title: str, save_path=None, save_cls=True, save_patch=True
@@ -348,27 +365,49 @@ def merge_image(im1, im2):
     return hconcat_resize_min([im1, im2])
 
 
+def select_fixed_examples(dataset, per_class=1):
+    counts = defaultdict(int)
+    selected = []
+
+    for idx, (_, cls) in enumerate(dataset.samples):
+        if counts[cls] < per_class:
+            selected.append((cls, idx))
+            counts[cls] += 1
+
+    return selected
+
+
 @torch.no_grad()
-def visualize_avit(data_loader, model, device, file_path):
+def visualize_avit(data_loader, model, device, file_path, fixed_img_pairs_path=None):
+    if fixed_img_pairs_path is None:
+        fixed_img_pairs = select_fixed_examples(data_loader.dataset, per_class=1)
+        np.save(FIXED_IMG_PAIRS_PATH, np.array(fixed_img_pairs, dtype=np.int64))
+        print("Saved", len(fixed_img_pairs), "pairs.")
+    else:
+        fixed_img_pairs = np.load(fixed_img_pairs_path)
+        print("Loaded", len(fixed_img_pairs), "pairs.")
+
     # this snipet visualize the token depth distribution of an avit model
     # more particular, it saves the image with the largset token depth std. per imagenet class
     # in validation set.
 
     criterion = torch.nn.CrossEntropyLoss()
-    metric_logger = MetricLogger(delimiter="  ")
-    header = 'Visualize:'
 
     # switch to evaluation mode
     model.eval()
     model = model.module if hasattr(model, "module") else model
-    save_image = True
 
     # amid imagenet class separation for best visualization, assert batch size is 10
     # such that no validation images overlap in classes
     # assert args.batch_size==50
-    class_set = set()
+    fixed_set = set((int(c), int(i)) for c, i in fixed_img_pairs)
 
-    for images, target in metric_logger.log_every(data_loader, 100, header):
+    # output reserving rate per layer
+    L = 12
+    layer_alive_sum = np.zeros(L, dtype=np.float64)
+    layer_token_count = 0  #
+
+    for images, target, indices in data_loader:
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
@@ -378,56 +417,80 @@ def visualize_avit(data_loader, model, device, file_path):
             _ = criterion(output, target)
 
         cnt_token = model.counter_token.data.cpu().numpy()
+        B, N = cnt_token.shape
+        num_patches = N - 1
+        H = W = int(num_patches ** 0.5)
+        depths = cnt_token[:, 1:]  # [B, num_patches]
+        for l_idx in range(L):
+            alive = (depths >= (l_idx + 1))  # bool [B, num_patches]
+            layer_alive_sum[l_idx] += alive.sum()
 
-        # this tries to save images
-        if save_image:
+        layer_token_count += B * num_patches
 
-            cnt_token_std_lst = np.std(cnt_token, axis=-1)
-            value = np.max(cnt_token_std_lst)
-            key = np.argmax(cnt_token_std_lst)
+        images_cpu = images.detach().cpu()
+        target_cpu = target.detach().cpu().numpy()
+        indices_cpu = np.array(indices)
 
-            # this part fetches most sensitive samples per class
-            tmp_set = set(target.data.cpu().numpy())
+        for b in range(B):
+            cls = int(target_cpu[b])
+            idx = int(indices_cpu[b])
+            if (cls, idx) not in fixed_set:
+                continue  # 不是我们选定的样本，跳过
 
-            if not all([x in class_set for x in tmp_set]):
-                print('Now visualizing token depth for class {}/1000.'.format(target[key].data.item()))
-                max_std = 0
+            tokens = cnt_token[b, 1:]  # 去掉CLS
+            array = tokens.reshape(H, W)
 
-            class_set = class_set | tmp_set
+            plt.figure()
+            plt.imshow(
+                array, 
+                cmap='hot', 
+                interpolation='nearest',
+                vmin=2,
+                vmax=12,          
+            )
+            plt.axis('off')
+            cb = plt.colorbar(shrink=0.8)
 
-            if value >= max_std:
+            # 文件名建议带上 cls 和 idx，方便多模型对齐
+            depth_path = os.path.join(file_path, f"class{cls}_idx{idx}_depth.jpg")
+            img_path   = os.path.join(file_path, f"class{cls}_idx{idx}_ref.jpg")
+            comb_path  = os.path.join(file_path, f"class{cls}_idx{idx}_combined.jpg")
 
-                max_std=value
-                idx=key
+            plt.savefig(depth_path, bbox_inches='tight', pad_inches=0)
+            cb.remove()
+            plt.close()
 
-                if not os.path.exists(file_path):
-                    os.makedirs(file_path)
+            vutils.save_image(
+                images_cpu[b],
+                img_path,
+                normalize=True,
+                scale_each=True,
+            )
 
-                target_token = cnt_token[idx,1:]
-                array = np.reshape(target_token, (14, 14))
+            im1 = cv2.imread(img_path)
+            im2 = cv2.imread(depth_path)
+            if im1 is not None and im2 is not None:
+                h = max(im1.shape[0], im2.shape[0])
 
-                plt.imshow(array, cmap='hot', interpolation='nearest')
-                plt.axis('off')
-                cb=plt.colorbar(shrink=0.8)
-
-                # save token depth heat map
-                plt.savefig(file_path + '/class{}_token_depth.jpg'.format(target[idx].data.item()))
-                vutils.save_image(
-                    images[idx].data, 
-                    file_path + '/class{}_ref.jpg'.format(target[idx].data.item()),
-                    normalize=True, scale_each=True
+                def pad(im):
+                    pad_h = h - im.shape[0]
+                    if pad_h <= 0:
+                        return im
+                    return cv2.copyMakeBorder(
+                        im, 0, pad_h, 0, 0, cv2.BORDER_CONSTANT, value=[0, 0, 0]
                     )
-                # save concatenated image
-                # note that this snippet is not fully optimized in speed
-                im1 = cv2.imread(file_path + '/class{}_ref.jpg'.format(target[idx].data.item()))
-                im2 = cv2.imread(file_path + '/class{}_token_depth.jpg'.format(target[idx].data.item()))
 
-                if im1 is not None and im2 is not None:
-                    cv2.imwrite(file_path + '/class{}_combined.jpg'.format(target[idx].data.item()), merge_image(im1, im2))
-
-                cb.remove()
+                im1p, im2p = pad(im1), pad(im2)
+                comb = np.concatenate([im1p, im2p], axis=1)
+                cv2.imwrite(comb_path, comb)
 
     print('Visualization done.')
+    layer_keep_ratio = layer_alive_sum / layer_token_count  # [L]
+
+    print("Per-layer average keep ratio (excluding CLS):")
+    print(layer_keep_ratio)
+    for l_idx in range(L):
+        print(f"Layer {l_idx+1}: {layer_keep_ratio[l_idx]:.4f}")
 
     return
 
@@ -441,12 +504,6 @@ if __name__ == "__main__":
     parser = config.get_full_parser()
     args = parser.parse_args()
     args = config.fill_default_args(args)
-
-    # Load data
-    data_loader_val, _ = load_dataset(args, "val")
-    imgs, targets = next(iter(data_loader_val))
-    imgs = imgs[0:batch]
-    imgs = imgs.to(args.device)
 
     # Load model
     print(f"Creating model: {args.vis_model}")
@@ -467,10 +524,15 @@ if __name__ == "__main__":
     model.to(args.device)
 
     output_dir = Path(args.base_dir) / "figs"
-    os.makedirs(output_dir, exist_ok=True)
-    save_path = output_dir / f"{args.vis_model}_{args.vis_mode}"
+    save_path = output_dir / f"{args.vis_model}-{args.vis_mode}"
+    os.makedirs(save_path, exist_ok=True)
 
     if args.vis_mode == "token":
+        # Load data
+        data_loader_val, _ = load_dataset(args, "val")
+        imgs, targets = next(iter(data_loader_val))
+        imgs = imgs[0:batch]
+        imgs = imgs.to(args.device)
         # Get attention scores
         if "DeiT" in args.vis_model:
             save_path = save_path / "uni"
@@ -487,5 +549,24 @@ if __name__ == "__main__":
             save_path = save_path / "uni"
             gradiants = get_gradients_mamba(model, imgs, mode=mode)
             plot_attention_heatmap(gradiants, heads, layers, save_path)
+
     elif args.vis_mode == "avit":
-        visualize_avit(data_loader_val, model, args.device, str(save_path))
+        val_base = datasets.ImageFolder(
+            "/srv/datasets/imagenet/val/",
+            transform=transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+            ])
+        )
+        val_dataset = IndexedDataset(val_base)
+
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset,
+            shuffle=False,
+            batch_size=int(1.5 * args.batch_size),
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=False,
+        )
+        visualize_avit(val_loader, model, args.device, save_path, FIXED_IMG_PAIRS_PATH)

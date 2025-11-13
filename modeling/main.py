@@ -1,9 +1,12 @@
+import warnings
+warnings.simplefilter("ignore", category=FutureWarning)
 import gc
 import copy
 import json
 import torch
 import numpy as np
 import torch.backends.cudnn as cudnn
+import torch.multiprocessing as mp
 
 from torchinfo import summary
 from timm.data import Mixup
@@ -431,6 +434,7 @@ def downstream(args, pretrained_path):
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     parser = config.get_full_parser()
     args = parser.parse_args()
     args = config.fill_default_args(args)
