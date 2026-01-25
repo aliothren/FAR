@@ -53,7 +53,7 @@ class BiMamba(nn.Module):
             headdim=self.head_dim,
             d_ssm=self.input_dim,
             ngroups=self.n_groups,
-            use_mem_eff_path=False,
+            # use_mem_eff_path=False,
         )
         self.mamba_fwd.out_proj = nn.Identity()
         self.mamba_bwd = Mamba2(
@@ -64,7 +64,7 @@ class BiMamba(nn.Module):
             headdim=self.head_dim,
             d_ssm=self.input_dim,
             ngroups=self.n_groups,
-            use_mem_eff_path=False,
+            # use_mem_eff_path=False,
         )
         self.mamba_bwd.out_proj = nn.Identity()
         self.head_proj = nn.Conv1d(
@@ -75,18 +75,44 @@ class BiMamba(nn.Module):
                             bias=False,
                         )
         self.post_proj = original_attn.proj
+        # self.register_buffer("_bwd_zero", torch.zeros(1,1,self.head_num,self.head_dim), persistent=False)
 
     def forward(self, x: torch.Tensor):
+        # # use when measuring throughput
+        # B, N, C = x.shape
+        # H, Dh = self.head_num, self.head_dim
+        # assert C == H * Dh
+        # x_fwd, _ = self.mamba_fwd(x)
+        # x_fwd = x_fwd.contiguous()
+        # x_fwd_h = x_fwd.reshape(B, N, H, Dh)
+        # x_bwd_h = self._bwd_zero.expand(B, N, H, Dh) 
+        # x_cat = torch.cat([x_fwd_h, x_bwd_h], dim=-1).contiguous()    # [B, N, H, 2Dh]
+        # x_cat = x_cat.permute(0, 2, 3, 1).reshape(B, 2 * C, N).contiguous()
+        # x = self.head_proj(x_cat)  # [B, C, N]
+        # x = x.permute(0, 2, 1).contiguous()  # [B, N, C]
+        # out = self.post_proj(x)
+        # return out, None
+
         B, N, C = x.shape
+        H, Dh = self.head_num, self.head_dim
+        assert C == H * Dh
+
         x_fwd, _ = self.mamba_fwd(x)
         x_bwd, _ = self.mamba_bwd(torch.flip(x, dims=[1]))  # [B, N, C]
         x_bwd = torch.flip(x_bwd, dims=[1])  
-        x_fwd_h = x_fwd.view(B, N, self.head_num, self.head_dim)
-        x_bwd_h = x_bwd.view(B, N, self.head_num, self.head_dim)
-        x_cat = torch.cat([x_fwd_h, x_bwd_h], dim=-1)           # [B, N, H, 2Dh]
-        x_cat = x_cat.view(B, N, self.head_num * 2 * self.head_dim)  # [B, N, 2C]
-        x_cat = x_cat.transpose(1, 2)     
-        x = self.head_proj(x_cat).transpose(1, 2)                                      
+        x_fwd = x_fwd.contiguous()
+        x_bwd = x_bwd.contiguous()
+
+        # [B, N, H, Dh]
+        x_fwd_h = x_fwd.reshape(B, N, H, Dh)
+        x_bwd_h = x_bwd.reshape(B, N, H, Dh)
+
+        x_cat = torch.cat([x_fwd_h, x_bwd_h], dim=-1).contiguous()    # [B, N, H, 2Dh]
+        x_cat = x_cat.permute(0, 2, 3, 1).reshape(B, 2 * C, N).contiguous()
+
+        x = self.head_proj(x_cat)  # [B, C, N]
+        x = x.permute(0, 2, 1).contiguous()  # [B, N, C]
+
         self.attn_out = x.clone()
         out = self.post_proj(x)
 
@@ -503,7 +529,9 @@ class ACT_BiMamba(nn.Module):
     
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None):
         B, N, C = x.shape
-        assert C == self.input_dim
+        H, Dh = self.head_num, self.head_dim
+        assert C == H * Dh
+
         if mask is None:
             keep_mask = torch.ones(B, N, dtype=torch.int64, device=x.device)
         else:
@@ -535,14 +563,17 @@ class ACT_BiMamba(nn.Module):
 
         x_fwd = x_fwd * seq_mask
         x_bwd = x_bwd * seq_mask
-        x_fwd_h = x_fwd.view(B, L_max, self.head_num, self.head_dim)
-        x_bwd_h = x_bwd.view(B, L_max, self.head_num, self.head_dim)
-        x_cat = torch.cat([x_fwd_h, x_bwd_h], dim=-1).view(B, L_max, 2 * C)   # [B, L, 2C]
-        x_cat = self.head_proj(x_cat.transpose(1, 2).contiguous()).transpose(1, 2)
+        x_fwd_h = x_fwd.reshape(B, L_max, H, Dh)
+        x_bwd_h = x_bwd.reshape(B, L_max, H, Dh)
+        x_cat = torch.cat([x_fwd_h, x_bwd_h], dim=-1).contiguous()    # [B, N, H, 2Dh]
+        x_cat = x_cat.permute(0, 2, 3, 1).reshape(B, 2 * C, L_max).contiguous()
 
-        idx_exp = idx_exp.to(device=x_cat.device, dtype=torch.long)
-        full_feat = x_cat.new_zeros(B, N, C)
-        full_feat.scatter_(1, idx_exp, x_cat)
+        x = self.head_proj(x_cat)  # [B, C, N]
+        x = x.permute(0, 2, 1).contiguous()  # [B, N, C]
+
+        idx_exp = idx_exp.to(device=x.device, dtype=torch.long)
+        full_feat = x.new_zeros(B, N, C)
+        full_feat.scatter_(1, idx_exp, x)
 
         self.attn_out = full_feat
         out = self.post_proj(full_feat)

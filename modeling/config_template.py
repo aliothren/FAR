@@ -37,7 +37,7 @@ BASE_MODEL_PATH = {
     },
     "DeiT-Base-384": {
         "name": "deit_base_patch16_384",
-        "weight": "",
+        "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_384-8de9b 5d1.pth",
     },
     "AViT-Tiny": {
         "name": "avit_tiny_patch16_224",
@@ -49,7 +49,7 @@ BASE_MODEL_PATH = {
     },
     "AViT-Base": {
         "name": "avit_base_patch16_224",
-        "weight": "",
+        "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
     },
 }
 
@@ -127,12 +127,27 @@ VIS_MODEL_PATH = {
         "name": "deit_base_patch16_224",
         "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
     },
-    "LSTM-Tiny": {
-        "weight": "",
-    },
     "Multihead-Tiny": {
+        "name": "Multihead-Tiny",
         "weight": "",
     },
+    "Mamba-Tiny": {
+        "name": "Mamba-Tiny",
+        "weight": "",
+    },
+    "AViT-attn": {
+        "name": "avit_tiny_patch16_224",
+        "weight": "",
+    },
+    "AViT-lstm": {
+        "name": "AViT-lstm",
+        "weight": "",
+    },
+    "AViT-mamba": {
+        "name": "AViT-mamba",
+        "weight": "",
+    },
+    
 }
 
 
@@ -384,6 +399,12 @@ def get_modeling_parser():
         default="DeiT-Tiny",
         type=str,
         help="Name of model to be visualized",
+    )
+    parser.add_argument(
+        "--vis-mode",
+        default="token",
+        choices=["token", "avit"],
+        help="Choose to visualize token-similarity or avit token sparsity",
     )
     parser.add_argument(
         "--vis-model-name",
@@ -782,7 +803,7 @@ def get_modeling_parser():
     parser.add_argument(
         "--decay",
         type=float,
-        default=1e-4,
+        default=5e-5,
         metavar="D",
         help="weight decay for regularizer (default: 0.001)",
     )

@@ -1,5 +1,6 @@
 import os
 import cv2
+import time
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,6 +12,7 @@ import torchvision.utils as vutils
 from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 import matplotlib.pyplot as plt
+from torch.utils.data import TensorDataset, DataLoader
 
 from modeling import config
 from modeling import models_act
@@ -41,7 +43,7 @@ def plot_heatmap(
     seq_length = data.shape[0]
 
     fig, ax = plt.subplots()
-    im = ax.imshow(data, cmap="viridis", vmin=0, vmax=2.0)
+    im = ax.imshow(data, cmap="viridis", vmin=0, vmax=3.0)
     # im = ax.imshow(np.log1p(data), cmap='viridis', vmin=0, vmax=2.0)
     ax.set_xticks([0, seq_length - 1])
     ax.set_xticklabels(["0", f"{seq_length - 1}"])
@@ -82,7 +84,7 @@ def plot_heatmap(
         )
 
         fig, ax = plt.subplots()
-        im = ax.imshow(patch_data, cmap="viridis", vmin=0, vmax=1.0)
+        im = ax.imshow(patch_data, cmap="viridis", vmin=0, vmax=2.0)
         # im = ax.imshow(patch_data, cmap='viridis')
         ax.set_title(title)
         ax.set_xticks([])
@@ -134,7 +136,7 @@ def get_gradients_mamba(model, imgs, head_num=3, mode="avg"):
             input.retain_grad()
             inputs[blk_idx] = input
 
-        hooks.append(blk.attn.mamba_fwd.register_forward_hook(hook_fn))
+        hooks.append(blk.attn.register_forward_hook(hook_fn))
 
         # ---- monkey-patch block.attn.forward ----
         original_forward = blk.attn.forward
@@ -142,20 +144,27 @@ def get_gradients_mamba(model, imgs, head_num=3, mode="avg"):
 
         def new_forward(self, input, blk_idx=idx):
             x_in = input                              # [B, T, C]
+            B, N, C = x_in.shape
+            H, Dh = self.head_num, self.head_dim
 
             x_fwd, _ = self.mamba_fwd(x_in)          # [B, T, C]
             x_bwd, _ = self.mamba_bwd(torch.flip(x_in, dims=[1]))  # [B, T, C]
-            x_cat = torch.cat(
-                [x_fwd, torch.flip(x_bwd, dims=[1])], dim=-1
-            )                                        # [B, T, 2C]
+            x_bwd = torch.flip(x_bwd, dims=[1])  
+            x_fwd = x_fwd.contiguous()
+            x_bwd = x_bwd.contiguous()
+            # [B, N, H, Dh]
+            x_fwd_h = x_fwd.reshape(B, N, H, Dh)
+            x_bwd_h = x_bwd.reshape(B, N, H, Dh)
+            x_cat = torch.cat([x_fwd_h, x_bwd_h], dim=-1).contiguous()    # [B, N, H, 2Dh]
+            x_cat = x_cat.permute(0, 2, 3, 1).reshape(B, 2 * C, N).contiguous()
+            x_hp = self.head_proj(x_cat)  # [B, C, N]
+            x_hp = x_hp.permute(0, 2, 1).contiguous()  # [B, N, C]
 
-            x_hp = self.head_proj(x_cat.transpose(1, 2)).transpose(1, 2)  # [B, T, C]
             self.attn_out = x_hp.clone()
-            H = self.head_dim
             for head_idx in range(head_num):
-                s = head_idx * H
-                e = (head_idx + 1) * H
-                head_feat = x_hp[:, :, s:e]          # [B, T, H]
+                s = head_idx * Dh
+                e = (head_idx + 1) * Dh
+                head_feat = x_hp[:, :, s:e]          # [B, T, Dh]
                 outputs[blk_idx][head_idx] = head_feat
 
             out = self.post_proj(x_hp)               # [B, T, C]
@@ -236,12 +245,12 @@ def get_gradients_multihead(model, imgs, head_num=3, mode="avg"):
         def new_forward(self, input, blk_idx=idx):
             # lstm_out: [B, T, 2*hidden_dim_total]  (=2*head_num*H)
             lstm_out, _ = self.lstm(self.pre_proj(input))
-            lstm_out = self.head_proj(lstm_out)
-            self.lstm_out = lstm_out.clone()
-            # H = self.hidden_dim // self.head_num
             H = self.hidden_dim // 3
             fw = lstm_out[:, :, : self.hidden_dim]  # [B, T, hidden_dim]
             bw = lstm_out[:, :, self.hidden_dim :]  # [B, T, hidden_dim]
+            self.lstm_out = self.head_proj(lstm_out)
+            # self.lstm_out = lstm_out.clone()
+            # H = self.hidden_dim // self.head_num
 
             for head_idx in range(head_num):
                 start = head_idx * H
@@ -256,7 +265,7 @@ def get_gradients_multihead(model, imgs, head_num=3, mode="avg"):
                 elif mode == "avg":
                     outputs[blk_idx][head_idx] = torch.cat([fw_part, bw_part], dim=-1)
 
-            return self.post_proj(lstm_out), lstm_out
+            return self.post_proj(self.lstm_out), self.lstm_out
 
         blk.attn.forward = new_forward.__get__(blk.attn, blk.attn.__class__)
 
@@ -375,6 +384,79 @@ def select_fixed_examples(dataset, per_class=1):
             counts[cls] += 1
 
     return selected
+
+
+def _get_images_from_batch(batch):
+    if isinstance(batch, (tuple, list)):
+        return batch[0]
+    if isinstance(batch, dict):
+        for k in ("images", "image", "x", "input"):
+            if k in batch:
+                return batch[k]
+        for v in batch.values():
+            if torch.is_tensor(v):
+                return v
+        raise ValueError("Dict batch has no tensor-like images field.")
+    if torch.is_tensor(batch):
+        return batch
+    raise TypeError(f"Unsupported batch type: {type(batch)}")
+
+
+@torch.no_grad()
+def measure_throughput(
+    model,
+    dataloader,
+    batch_size: int,
+    iters,
+    warmup,
+    device,
+):
+    it = iter(dataloader)
+
+    def next_images():
+        nonlocal it
+        while True:
+            try:
+                batch = next(it)
+            except StopIteration:
+                it = iter(dataloader)
+                batch = next(it)
+            x = _get_images_from_batch(batch)
+            if x.shape[0] >= batch_size:
+                return x
+    
+    # warmup（不计时）
+    for _ in range(warmup):
+        x_big = next_images()
+        x = x_big[:batch_size].contiguous()
+        # x = x_big[:batch_size].contiguous().to(device, non_blocking=True)
+
+        _ = model(x)
+    torch.cuda.synchronize()
+
+    # timed
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+
+    for _ in range(iters):
+        x_big = next_images()
+        x = x_big[:batch_size].contiguous()
+        # x = x_big[:batch_size].contiguous().to(device, non_blocking=True)
+
+        _ = model(x)
+    torch.cuda.synchronize()
+    end = time.perf_counter()
+
+    sec = end - start
+    imgs_per_sec = (iters * batch_size) / sec
+    return imgs_per_sec, sec
+
+
+def make_random_token_dataloader(batch_size: int, N: int, C: int, num_batches: int,
+                                 dtype=torch.float16, device: str = "cuda"):
+    x = torch.randn(num_batches * batch_size, N, C, dtype=dtype, device=device)
+    ds = TensorDataset(x)  # so _get_images_from_batch(batch) returns batch[0]
+    return DataLoader(ds, batch_size=batch_size, shuffle=False, drop_last=True)
 
 
 @torch.no_grad()
@@ -520,7 +602,28 @@ if __name__ == "__main__":
         )
         model = architectures.load_weight(model, args.vis_weight)
     else:
-        model = torch.load(args.vis_weight)
+        model_args = args if args.avit else None  # For AViT
+        model = create_model(
+            model_name=args.base_model_name,
+            pretrained=False,
+            num_classes=args.nb_classes,
+            drop_rate=args.drop,
+            drop_path_rate=args.drop_path,
+            drop_block_rate=None,
+            img_size=args.input_size,
+            args=model_args,
+        )
+        model = architectures.replace_attention(
+            args=args,
+            model=model,
+            repl_blocks=args.replace,
+            target=args.rep_by,
+        )
+        model = architectures.load_weight(model, args.vis_weight)
+        # model.use_external_mask = False
+        # torch.save(model, "/home/yuxinr/far/FAR/figs/temp_model.pth")
+        # exit(0)
+        # model = torch.load(args.vis_weight)
     model.to(args.device)
 
     output_dir = Path(args.base_dir) / "figs"
@@ -570,3 +673,29 @@ if __name__ == "__main__":
             drop_last=False,
         )
         visualize_avit(val_loader, model, args.device, save_path, FIXED_IMG_PAIRS_PATH)
+
+    elif args.vis_mode == "tp":
+        # data_loader, _ = load_dataset(args, "val")
+        batch_sizes = [1, 16, ]
+        N=577
+        C=768
+        model = model.blocks[0].attn
+        model.eval()
+        data_loader = make_random_token_dataloader(
+            batch_size=16, N=N, C=C, num_batches=400, dtype=torch.float32, device="cuda"
+        )
+
+        iterations = 300
+        warmup = 50
+        for bsz in batch_sizes:
+            throughput, total_time = measure_throughput(
+                model,
+                data_loader,
+                bsz,
+                iters=iterations,
+                warmup=warmup,
+                device=args.device,
+            )
+            print(
+                f"Batch size {bsz}: {throughput:8.2f} samples/s, {throughput*N:10.2f} tokens/s"
+            )

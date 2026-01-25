@@ -389,9 +389,7 @@ def train_one_epoch(
             if use_avit_mask:
                 # halting score loss
                 halting_loss = 0.0
-                h_loss_fn = torch.nn.MSELoss()
                 for h_s, h_t in zip(student_h_score, teacher_h_score):
-                    # halting_loss += h_loss_fn(h_s, h_t)
                     halting_loss += bernoulli_kl( h_t[:,1:], h_s[:,1:])
                 avit_loss += halting_loss
 
@@ -617,7 +615,7 @@ def train_model(
         use_multi_lstm_mask = True
         lstm_mask = {"mask_ih": mask_ih, "mask_hh": mask_hh, "mask_head": mask_head}
         print("Using multi-head LSTM masks.")
-    # Use regularization mask in finetune after pruning
+
     if args.reg_in_train and mask:
         use_reg_mask = True
         reg_mask = mask
