@@ -375,79 +375,6 @@ def select_fixed_examples(dataset, per_class=1):
     return selected
 
 
-def _get_images_from_batch(batch):
-    if isinstance(batch, (tuple, list)):
-        return batch[0]
-    if isinstance(batch, dict):
-        for k in ("images", "image", "x", "input"):
-            if k in batch:
-                return batch[k]
-        for v in batch.values():
-            if torch.is_tensor(v):
-                return v
-        raise ValueError("Dict batch has no tensor-like images field.")
-    if torch.is_tensor(batch):
-        return batch
-    raise TypeError(f"Unsupported batch type: {type(batch)}")
-
-
-@torch.no_grad()
-def measure_throughput(
-    model,
-    dataloader,
-    batch_size: int,
-    iters,
-    warmup,
-    device,
-):
-    it = iter(dataloader)
-
-    def next_images():
-        nonlocal it
-        while True:
-            try:
-                batch = next(it)
-            except StopIteration:
-                it = iter(dataloader)
-                batch = next(it)
-            x = _get_images_from_batch(batch)
-            if x.shape[0] >= batch_size:
-                return x
-    
-    # warmup（不计时）
-    for _ in range(warmup):
-        x_big = next_images()
-        x = x_big[:batch_size].contiguous()
-        # x = x_big[:batch_size].contiguous().to(device, non_blocking=True)
-
-        _ = model(x)
-    torch.cuda.synchronize()
-
-    # timed
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-
-    for _ in range(iters):
-        x_big = next_images()
-        x = x_big[:batch_size].contiguous()
-        # x = x_big[:batch_size].contiguous().to(device, non_blocking=True)
-
-        _ = model(x)
-    torch.cuda.synchronize()
-    end = time.perf_counter()
-
-    sec = end - start
-    imgs_per_sec = (iters * batch_size) / sec
-    return imgs_per_sec, sec
-
-
-def make_random_token_dataloader(batch_size: int, N: int, C: int, num_batches: int,
-                                 dtype=torch.float16, device: str = "cuda"):
-    x = torch.randn(num_batches * batch_size, N, C, dtype=dtype, device=device)
-    ds = TensorDataset(x)  # so _get_images_from_batch(batch) returns batch[0]
-    return DataLoader(ds, batch_size=batch_size, shuffle=False, drop_last=True)
-
-
 @torch.no_grad()
 def visualize_avit(data_loader, model, device, file_path, fixed_img_pairs_path=None):
     if fixed_img_pairs_path is None:
@@ -661,29 +588,3 @@ if __name__ == "__main__":
             drop_last=False,
         )
         visualize_avit(val_loader, model, args.device, save_path, FIXED_IMG_PAIRS_PATH)
-
-    elif args.vis_mode == "tp":
-        # data_loader, _ = load_dataset(args, "val")
-        batch_sizes = [1, 16, ]
-        N=577
-        C=768
-        model = model.blocks[0].attn
-        model.eval()
-        data_loader = make_random_token_dataloader(
-            batch_size=16, N=N, C=C, num_batches=400, dtype=torch.float32, device="cuda"
-        )
-
-        iterations = 300
-        warmup = 50
-        for bsz in batch_sizes:
-            throughput, total_time = measure_throughput(
-                model,
-                data_loader,
-                bsz,
-                iters=iterations,
-                warmup=warmup,
-                device=args.device,
-            )
-            print(
-                f"Batch size {bsz}: {throughput:8.2f} samples/s, {throughput*N:10.2f} tokens/s"
-            )
