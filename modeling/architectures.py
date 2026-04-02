@@ -53,7 +53,7 @@ class BiMamba(nn.Module):
             headdim=self.head_dim,
             d_ssm=self.input_dim,
             ngroups=self.n_groups,
-            # use_mem_eff_path=False,
+            use_mem_eff_path=False,
         )
         self.mamba_fwd.out_proj = nn.Identity()
         self.mamba_bwd = Mamba2(
@@ -64,7 +64,7 @@ class BiMamba(nn.Module):
             headdim=self.head_dim,
             d_ssm=self.input_dim,
             ngroups=self.n_groups,
-            # use_mem_eff_path=False,
+            use_mem_eff_path=False,
         )
         self.mamba_bwd.out_proj = nn.Identity()
         self.head_proj = nn.Conv1d(

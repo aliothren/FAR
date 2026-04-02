@@ -1,6 +1,5 @@
 import os
 import cv2
-import time
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,7 +11,6 @@ import torchvision.utils as vutils
 from torchvision import datasets, transforms
 from torch.utils.data import Dataset
 import matplotlib.pyplot as plt
-from torch.utils.data import TensorDataset, DataLoader
 
 from modeling import config
 from modeling import models_act
@@ -246,26 +244,17 @@ def get_gradients_multihead(model, imgs, head_num=3, mode="avg"):
             # lstm_out: [B, T, 2*hidden_dim_total]  (=2*head_num*H)
             lstm_out, _ = self.lstm(self.pre_proj(input))
             H = self.hidden_dim // 3
-            fw = lstm_out[:, :, : self.hidden_dim]  # [B, T, hidden_dim]
-            bw = lstm_out[:, :, self.hidden_dim :]  # [B, T, hidden_dim]
-            self.lstm_out = self.head_proj(lstm_out)
-            # self.lstm_out = lstm_out.clone()
+            lstm_out = self.head_proj(lstm_out)
+            self.lstm_out = lstm_out.clone()
             # H = self.hidden_dim // self.head_num
 
             for head_idx in range(head_num):
                 start = head_idx * H
                 end = (head_idx + 1) * H
-                fw_part = fw[:, :, start:end]  # [B, T, H]
-                bw_part = bw[:, :, start:end]  # [B, T, H]
-                # bw_part = torch.flip(bw[:, :, start:end], dims=[1])  # [B, T, H]
-                if mode == "forward":
-                    outputs[blk_idx][head_idx] = fw_part
-                elif mode == "backward":
-                    outputs[blk_idx][head_idx] = bw_part
-                elif mode == "avg":
-                    outputs[blk_idx][head_idx] = torch.cat([fw_part, bw_part], dim=-1)
+                head_feat = lstm_out[:, :, start:end]          # [B, T, Dh]
+                outputs[blk_idx][head_idx] = head_feat
 
-            return self.post_proj(self.lstm_out), self.lstm_out
+            return self.post_proj(lstm_out), self.lstm_out
 
         blk.attn.forward = new_forward.__get__(blk.attn, blk.attn.__class__)
 
@@ -533,7 +522,6 @@ def visualize_avit(data_loader, model, device, file_path, fixed_img_pairs_path=N
             plt.axis('off')
             cb = plt.colorbar(shrink=0.8)
 
-            # 文件名建议带上 cls 和 idx，方便多模型对齐
             depth_path = os.path.join(file_path, f"class{cls}_idx{idx}_depth.jpg")
             img_path   = os.path.join(file_path, f"class{cls}_idx{idx}_ref.jpg")
             comb_path  = os.path.join(file_path, f"class{cls}_idx{idx}_combined.jpg")

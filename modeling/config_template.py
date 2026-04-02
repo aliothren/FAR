@@ -37,14 +37,16 @@ BASE_MODEL_PATH = {
     },
     "DeiT-Base-384": {
         "name": "deit_base_patch16_384",
-        "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_384-8de9b 5d1.pth",
+        "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_384-8de9b5d1.pth",
     },
     "AViT-Tiny": {
         "name": "avit_tiny_patch16_224",
         "weight": "",
+        # "weight": "https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth",
     },
     "AViT-Small": {
         "name": "avit_small_patch16_224",
+        # "weight": "https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
         "weight": "",
     },
     "AViT-Base": {
@@ -83,9 +85,10 @@ BASE_MODEL_DS_PATH = {
 
 # Path to pretrained checkpoints of FAR models
 FAR_MODEL_PATH = {
-    "DeiT-Tiny": "",
-    "DeiT-Small": "",
-    "DeiT-Base": "",
+    "LSTM-Tiny": "",
+    "LSTM-Small": "",
+    "LSTM-Base": "",
+    "Mamba-Tiny": "",
 }
 
 # Path to checkpoints of pruned FAR models
@@ -123,10 +126,6 @@ VIS_MODEL_PATH = {
         "name": "deit_small_patch16_224",
         "weight": "https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
     },
-    "DeiT-Base": {
-        "name": "deit_base_patch16_224",
-        "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
-    },
     "Multihead-Tiny": {
         "name": "Multihead-Tiny",
         "weight": "",
@@ -150,6 +149,50 @@ VIS_MODEL_PATH = {
     
 }
 
+# Path to models for statistics
+STAT_MODEL_PATH = {
+    "DeiT-Tiny": {
+        "name": "deit_tiny_patch16_224",
+        "weight": "https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth",
+    },
+    "DeiT-Base": {
+        "name": "deit_base_patch16_224",
+        "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
+    },
+    "DeiT-Base-384": {
+        "name": "deit_base_patch16_384",
+        "weight": "https://dl.fbaipublicfiles.com/deit/deit_base_patch16_384-8de9b5d1.pth",
+    },
+    "Multihead-Tiny": {
+        "name": "Multihead-Tiny",
+        "weight": "",
+    },
+    "Mamba-Tiny": {
+        "name": "Mamba-Tiny",
+        "weight": "",
+    },
+    "Mamba-Base": {
+        "name": "Mamba-Base",
+        "weight": "",
+    },
+    "Mamba-Base-384": {
+        "name": "Mamba-Base-384",
+        "weight": "",
+    },
+    "AViT-attn": {
+        "name": "avit_tiny_patch16_224",
+        "weight": "",
+    },
+    "AViT-lstm": {
+        "name": "AViT-lstm",
+        "weight": "",
+    },
+    "AViT-mamba": {
+        "name": "AViT-mamba",
+        "weight": "",
+    },
+    
+}
 
 ###### ----------- Parser utils ----------- ######
 def parse_replace(value):
@@ -220,6 +263,14 @@ def fill_default_args(args, full_arg=True):
     if args.vis_model_name == "":
         args.vis_model_name = VIS_MODEL_PATH[args.vis_model]["name"]
         print(f"Using default visualization model version {args.vis_model_name}")
+
+    if args.stat_weight == "":
+        args.stat_weight = STAT_MODEL_PATH[args.stat_model]["weight"]
+        print(f"Using default stat model weight {args.stat_weight}")
+
+    if args.stat_model_name == "":
+        args.stat_model_name = STAT_MODEL_PATH[args.stat_model]["name"]
+        print(f"Using default stat model version {args.stat_model_name}")
 
     if args.mode == "train":
         if args.base_ds_weight == "" and args.ds_in_train:
@@ -388,8 +439,7 @@ def get_modeling_parser():
     )
     parser.add_argument(
         "--far-model",
-        default="DeiT-Tiny",
-        choices=["DeiT-Tiny", "DeiT-Small", "DeiT-Base"],
+        default="LSTM-Tiny",
         type=str,
         help="Name of attention base model which FAR model is distilled from. e.g.: DeiT-Tiny",
     )
@@ -414,6 +464,27 @@ def get_modeling_parser():
     )
     parser.add_argument(
         "--vis-weight", default="", help="path of visualization target model checkpoint"
+    )
+
+    parser.add_argument(
+        "--stat-model",
+        default="DeiT-Tiny",
+        type=str,
+        help="Name of model for statistics",
+    )
+    parser.add_argument(
+        "--stat-mode",
+        default="sparsity",
+        choices=["sparsity", "throughput"],
+        help="Choose statistics mode",
+    )
+    parser.add_argument(
+        "--stat-model-name",
+        default="",
+        type=str,
+        help="stat-model index name for attention base models, e.g.: deit_tiny_patch16_224",)
+    parser.add_argument(
+        "--stat-weight", default="", help="path of target model checkpoint for statistics"
     )
     parser.add_argument(
         "--attn-weight",
